@@ -1,0 +1,253 @@
+"""推演引擎：无调拨基线、按订单重放、贪心求解调拨计划。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from itertools import count
+
+from .ledger import Ledger, LedgerError, PaymentResult, TransferLeg
+from .models import FlowKind, Priority, money
+from .plan import Plan, TransferOrder
+from .scenario import Scenario
+
+
+def daterange(start: str, end: str):
+    d = date.fromisoformat(start)
+    last = date.fromisoformat(end)
+    while d <= last:
+        yield d.isoformat()
+        d += timedelta(days=1)
+
+
+def add_days(day: str, days: int) -> str:
+    return (date.fromisoformat(day) + timedelta(days=days)).isoformat()
+
+
+@dataclass
+class ReplayResult:
+    ledger: Ledger
+    gaps: list[PaymentResult] = field(default_factory=list)
+
+    def gap_total_by_priority(self) -> dict[int, Decimal]:
+        out = {int(Priority.P1_CRITICAL): Decimal("0"),
+               int(Priority.P2_NORMAL): Decimal("0"),
+               int(Priority.P3_OPTIONAL): Decimal("0")}
+        for g in self.gaps:
+            out[g.priority] += g.shortfall
+        return out
+
+
+def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
+           legs: list[TransferLeg] | None = None,
+           snapshot_daily: bool = False) -> ReplayResult:
+    """按日期重放。orders 为计划时与 legs 二选一；legs 可用于执行记录。"""
+    scenario.validate()
+    if legs is None:
+        legs = Ledger.legs_from_orders(orders or [])
+    leg_ids = [leg.order_id for leg in legs]
+    if len(set(leg_ids)) != len(leg_ids):
+        raise LedgerError("调拨单号重复")
+
+    inflows: dict[str, list] = {}
+    outflows: dict[str, list] = {}
+    for f in scenario.flows:
+        (inflows if f.kind == FlowKind.INFLOW else outflows).setdefault(
+            f.date, []).append(f)
+    initiations: dict[str, list[TransferLeg]] = {}
+    arrivals: dict[str, list[TransferLeg]] = {}
+    for leg in legs:
+        initiations.setdefault(leg.initiate_date, []).append(leg)
+        arrivals.setdefault(leg.arrival_date, []).append(leg)
+
+    ledger = Ledger.open({a.account_id: a.opening_balance
+                          for a in scenario.accounts})
+    gaps: list[PaymentResult] = []
+    for day in daterange(scenario.start_date, scenario.end_date):
+        for f in sorted(inflows.get(day, []), key=lambda x: x.flow_id):
+            ledger.post_inflow(day, f.account_id, f.amount, f.flow_id)
+        for leg in sorted(initiations.get(day, []), key=lambda x: x.order_id):
+            ledger.initiate(day, leg)   # 余额不足直接抛错
+        for leg in sorted(arrivals.get(day, []), key=lambda x: x.order_id):
+            if leg.order_id not in ledger.in_transit:
+                raise LedgerError(
+                    f"{day} 调拨 {leg.order_id} 到账失败：该笔调拨此前未能成功发起"
+                    f"（资金未在 {leg.initiate_date} 离开 {leg.source}）")
+            ledger.arrive(day, leg.order_id)
+        day_outs = sorted(outflows.get(day, []),
+                          key=lambda x: (x.priority, x.flow_id))
+        for f in day_outs:
+            res = ledger.pay_outflow(day, f.flow_id, f.account_id,
+                                     f.amount, int(f.priority))
+            if res.shortfall > 0:
+                gaps.append(res)
+        if snapshot_daily:
+            ledger.snapshot(day)
+        ledger.verify_conservation()
+    ledger.verify_conservation()
+    return ReplayResult(ledger=ledger, gaps=gaps)
+
+
+def simulate_baseline(scenario: Scenario) -> ReplayResult:
+    """不做任何调拨时的资金缺口基线。"""
+    return replay(scenario, orders=[])
+
+
+# ---------------- 贪心求解器 ----------------
+
+MAX_HOPS = 3
+
+
+@dataclass
+class Chain:
+    orders: list[TransferOrder]
+    fee: Decimal
+
+
+def _split_principal(amount: Decimal, rule) -> list[Decimal] | None:
+    """按规则单笔上下限把总额拆成若干笔本金。"""
+    amount = money(amount)
+    if amount <= 0:
+        return None
+    cap = rule.max_amount
+    if cap is None:
+        if amount < rule.min_amount:
+            return [rule.min_amount]
+        return [amount]
+    if amount < rule.min_amount:
+        amount = rule.min_amount
+    n = int((amount + cap - 1) // cap)
+    base = money(amount / n)
+    pieces = [base] * n
+    rest = money(amount - base * n)
+    pieces[0] += rest
+    if pieces[-1] < rule.min_amount or pieces[0] > cap:
+        return None
+    return pieces
+
+
+def _enumerate_chains(scenario: Scenario, target: str, need: Decimal,
+                      deadline: str, id_gen) -> list[Chain]:
+    """反向 DFS 枚举资金路径，生成调拨链（含手续费逐级回补）。"""
+    chains: list[Chain] = []
+
+    # rev: target_account -> [(rule, source_account)]
+    rev: dict[str, list] = {}
+    for r in scenario.transfer_rules:
+        rev.setdefault(r.target, []).append(r)
+
+    def walk(cur_account: str, deliver: Decimal, cur_deadline: str,
+             hops: list, visited: frozenset):
+        # hops: 反向累积的 (rule, pieces, initiate, arrive)
+        for rule in rev.get(cur_account, []):
+            src = rule.source
+            if src in visited:
+                continue
+            arrive = cur_deadline                       # 到账不晚于用款日
+            initiate = add_days(arrive, -rule.lag_days)
+            if initiate < scenario.start_date:
+                continue                                # 期初之前无法发起
+            pieces = _split_principal(deliver, rule)
+            if pieces is None:
+                continue
+            fee = sum((rule.fee_for(p) for p in pieces), Decimal("0"))
+            hop = (rule, pieces, initiate, arrive)
+            new_hops = hops + [hop]
+            orders = []
+            for h_rule, h_pieces, h_init, h_arr in reversed(new_hops):
+                for p in h_pieces:
+                    orders.append(TransferOrder(
+                        order_id=next(id_gen), source=h_rule.source,
+                        target=h_rule.target, initiate_date=h_init,
+                        arrival_date=h_arr, principal=p,
+                        fee=h_rule.fee_for(p), purpose=""))
+            chains.append(Chain(orders, fee))
+            if len(new_hops) < MAX_HOPS:
+                # 上游须在用款方发起日的前一天到账（同日到账不可用于发起）
+                upstream_need = money(sum(pieces) + fee)
+                walk(src, upstream_need, add_days(initiate, -1),
+                     new_hops, visited | {src})
+
+    walk(target, need, deadline, [], frozenset({target}))
+    return chains
+
+
+def _objective(scenario: Scenario, orders: list[TransferOrder]):
+    try:
+        result = replay(scenario, orders)
+    except LedgerError:
+        return None
+    by_pri = result.gap_total_by_priority()
+    fee = sum((o.fee for o in orders), Decimal("0"))
+    score = (by_pri[int(Priority.P1_CRITICAL)],
+             by_pri[int(Priority.P2_NORMAL)],
+             by_pri[int(Priority.P3_OPTIONAL)],
+             fee)
+    return score, result
+
+
+@dataclass
+class SolveResult:
+    plan: Plan
+    replay: ReplayResult
+
+
+def solve(scenario: Scenario, solver_name: str = "greedy") -> SolveResult:
+    """逐缺口贪心：始终处理最早、最高优先的缺口，选费用最低的可行链。"""
+    scenario.validate()
+    orders: list[TransferOrder] = []
+    abandoned: set[str] = set()
+    id_gen = (f"T{i:03d}" for i in count(1))
+
+    for _ in range(200):
+        result = replay(scenario, orders)
+        pending = [g for g in result.gaps if g.flow_id not in abandoned]
+        if not pending:
+            break
+        gap = sorted(pending, key=lambda g: (g.date, g.priority, g.flow_id))[0]
+        need = money(gap.shortfall)
+
+        chains = _enumerate_chains(scenario, gap.account_id, need,
+                                   gap.date, id_gen)
+        best = None
+        best_score = None
+        base_score, _ = _objective(scenario, orders)
+        for chain in sorted(chains, key=lambda c: (c.fee, len(c.orders))):
+            trial = orders + chain.orders
+            scored = _objective(scenario, trial)
+            if scored is None:
+                continue
+            score, _ = scored
+            if score[:3] < base_score[:3] and (
+                    best_score is None or score < best_score):
+                best = chain
+                best_score = score
+        if best is None:
+            abandoned.add(gap.flow_id)
+            continue
+        orders.extend(best.orders)
+
+    final = replay(scenario, orders, snapshot_daily=True)
+    by_pri = final.gap_total_by_priority()
+    total_fee = money(sum((o.fee for o in orders), Decimal("0")))
+    remaining = [
+        {"flow_id": g.flow_id, "account_id": g.account_id, "date": g.date,
+         "priority": g.priority, "due": str(g.due), "paid": str(g.paid),
+         "shortfall": str(money(g.shortfall))}
+        for g in sorted(final.gaps, key=lambda g: (g.date, g.priority))
+    ]
+    plan = Plan(
+        scenario_id=scenario.scenario_id,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+        orders=sorted(orders, key=lambda o: (o.initiate_date, o.order_id)),
+        remaining_gaps=remaining,
+        total_fee=total_fee,
+        objective=(int(by_pri[int(Priority.P1_CRITICAL)] * 100),
+                   int(by_pri[int(Priority.P2_NORMAL)] * 100),
+                   int(by_pri[int(Priority.P3_OPTIONAL)] * 100),
+                   int(total_fee * 100)),
+        solver=solver_name,
+        notes="目标序：(P1缺口,P2缺口,P3缺口,总手续费)，字典序最小",
+    )
+    return SolveResult(plan=plan, replay=final)
