@@ -1,0 +1,202 @@
+{
+  "scenario_path": "data/scenario_example.json",
+  "planning": {
+    "transfer_step": "50.00",
+    "max_transfers_per_period": 2,
+    "max_search_nodes": 50000
+  },
+  "plans_considered": 2440,
+  "transfers": [
+    {
+      "transfer_id": "TR-0001",
+      "rule_id": "A-TO-B-1",
+      "source": "A",
+      "destination": "B",
+      "initiate_time": "T0",
+      "arrival_time": "T1",
+      "principal": "250.00",
+      "fee": "2.50",
+      "source_debit": "252.50",
+      "status": "settled"
+    }
+  ],
+  "periods": [
+    {
+      "time": "T0",
+      "gaps": [
+        {
+          "flow_id": "EXP-WAGES",
+          "account": "A",
+          "priority": 1,
+          "due": "150.00",
+          "paid": "150.00",
+          "shortfall": "0.00",
+          "description": "wages"
+        }
+      ],
+      "transfers_initiated": [
+        {
+          "transfer_id": "TR-0001",
+          "rule_id": "A-TO-B-1",
+          "source": "A",
+          "destination": "B",
+          "initiate_time": "T0",
+          "arrival_time": "T1",
+          "principal": "250.00",
+          "fee": "2.50",
+          "source_debit": "252.50",
+          "status": "settled"
+        }
+      ],
+      "ending_balances": {
+        "A": "497.50",
+        "B": "50.00"
+      }
+    },
+    {
+      "time": "T1",
+      "gaps": [
+        {
+          "flow_id": "EXP-TAX",
+          "account": "B",
+          "priority": 1,
+          "due": "300.00",
+          "paid": "300.00",
+          "shortfall": "0.00",
+          "description": "tax"
+        }
+      ],
+      "transfers_initiated": [],
+      "ending_balances": {
+        "A": "750.00",
+        "B": "0.00"
+      }
+    },
+    {
+      "time": "T2",
+      "gaps": [
+        {
+          "flow_id": "EXP-SUPPLIER",
+          "account": "A",
+          "priority": 2,
+          "due": "400.00",
+          "paid": "400.00",
+          "shortfall": "0.00",
+          "description": "supplier"
+        }
+      ],
+      "transfers_initiated": [],
+      "ending_balances": {
+        "A": "97.50",
+        "B": "500.00"
+      }
+    },
+    {
+      "time": "T3",
+      "gaps": [
+        {
+          "flow_id": "EXP-RENT",
+          "account": "B",
+          "priority": 3,
+          "due": "250.00",
+          "paid": "250.00",
+          "shortfall": "0.00",
+          "description": "rent"
+        }
+      ],
+      "transfers_initiated": [],
+      "ending_balances": {
+        "A": "97.50",
+        "B": "250.00"
+      }
+    }
+  ],
+  "final_balances": {
+    "A": "97.50",
+    "B": "250.00"
+  },
+  "total_fees": "2.50",
+  "trial_balance": {
+    "opening": "650.00",
+    "settled_income": "800.00",
+    "paid_expenses": "1100.00",
+    "fees": "2.50",
+    "in_transit": "0.00",
+    "account_total": "347.50",
+    "check": "0.00"
+  },
+  "ledger": [
+    {
+      "time": "T0",
+      "event_id": "EXP-WAGES",
+      "account": "A",
+      "debit": "150.00",
+      "credit": "0.00",
+      "balance": "450.00",
+      "note": "wages"
+    },
+    {
+      "time": "T1",
+      "event_id": "INC-A-T1",
+      "account": "A",
+      "debit": "0.00",
+      "credit": "300.00",
+      "balance": "750.00",
+      "note": "customer receipt"
+    },
+    {
+      "time": "T0",
+      "event_id": "TR-0001",
+      "account": "A",
+      "debit": "252.50",
+      "credit": "0.00",
+      "balance": "497.50",
+      "note": "transfer out via A-TO-B-1: principal 250.00 + fee 2.50"
+    },
+    {
+      "time": "T1",
+      "event_id": "ARRIVAL",
+      "account": "B",
+      "debit": "0.00",
+      "credit": "250.00",
+      "balance": "300.00",
+      "note": "scheduled transfer arrival"
+    },
+    {
+      "time": "T1",
+      "event_id": "EXP-TAX",
+      "account": "B",
+      "debit": "300.00",
+      "credit": "0.00",
+      "balance": "0.00",
+      "note": "tax"
+    },
+    {
+      "time": "T2",
+      "event_id": "INC-B-T2",
+      "account": "B",
+      "debit": "0.00",
+      "credit": "500.00",
+      "balance": "500.00",
+      "note": "subsidiary collection"
+    },
+    {
+      "time": "T2",
+      "event_id": "EXP-SUPPLIER",
+      "account": "A",
+      "debit": "400.00",
+      "credit": "0.00",
+      "balance": "97.50",
+      "note": "supplier"
+    },
+    {
+      "time": "T3",
+      "event_id": "EXP-RENT",
+      "account": "B",
+      "debit": "250.00",
+      "credit": "0.00",
+      "balance": "250.00",
+      "note": "rent"
+    }
+  ]
+}

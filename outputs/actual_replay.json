@@ -1,0 +1,152 @@
+{
+  "periods": [
+    {
+      "time": "T0",
+      "expenses": [
+        {
+          "flow_id": "EXP-WAGES",
+          "due": "150.00",
+          "paid": "150.00",
+          "shortfall": "0.00"
+        }
+      ],
+      "balances": {
+        "A": "450.00",
+        "B": "50.00"
+      }
+    },
+    {
+      "time": "T1",
+      "expenses": [
+        {
+          "flow_id": "EXP-TAX",
+          "due": "300.00",
+          "paid": "50.00",
+          "shortfall": "250.00"
+        }
+      ],
+      "balances": {
+        "A": "548.00",
+        "B": "0.00"
+      }
+    },
+    {
+      "time": "T2",
+      "expenses": [
+        {
+          "flow_id": "EXP-SUPPLIER",
+          "due": "400.00",
+          "paid": "400.00",
+          "shortfall": "0.00"
+        }
+      ],
+      "balances": {
+        "A": "148.00",
+        "B": "500.00"
+      }
+    },
+    {
+      "time": "T3",
+      "expenses": [
+        {
+          "flow_id": "EXP-RENT",
+          "due": "250.00",
+          "paid": "250.00",
+          "shortfall": "0.00"
+        }
+      ],
+      "balances": {
+        "A": "148.00",
+        "B": "250.00"
+      }
+    }
+  ],
+  "transfers": [
+    {
+      "transfer_id": "ACT-0001",
+      "rule_id": "A-TO-B-1",
+      "source": "A",
+      "destination": "B",
+      "initiate_time": "T0",
+      "arrival_time": "T1",
+      "principal": "200.00",
+      "fee": "2.00",
+      "source_debit": "202.00",
+      "status": "in_transit"
+    }
+  ],
+  "ledger": [
+    {
+      "time": "T0",
+      "event_id": "EXP-WAGES",
+      "account": "A",
+      "debit": "150.00",
+      "credit": "0.00",
+      "balance": "450.00",
+      "note": "actual expense: wages"
+    },
+    {
+      "time": "T0",
+      "event_id": "ACT-0001",
+      "account": "A",
+      "debit": "202.00",
+      "credit": "0.00",
+      "balance": "248.00",
+      "note": "transfer out via A-TO-B-1: principal 200.00 + fee 2.00"
+    },
+    {
+      "time": "T1",
+      "event_id": "INC-A-T1",
+      "account": "A",
+      "debit": "0.00",
+      "credit": "300.00",
+      "balance": "548.00",
+      "note": "actual income: customer receipt"
+    },
+    {
+      "time": "T1",
+      "event_id": "EXP-TAX",
+      "account": "B",
+      "debit": "50.00",
+      "credit": "0.00",
+      "balance": "0.00",
+      "note": "actual expense: tax"
+    },
+    {
+      "time": "T2",
+      "event_id": "INC-B-T2",
+      "account": "B",
+      "debit": "0.00",
+      "credit": "500.00",
+      "balance": "500.00",
+      "note": "actual income: subsidiary collection"
+    },
+    {
+      "time": "T2",
+      "event_id": "EXP-SUPPLIER",
+      "account": "A",
+      "debit": "400.00",
+      "credit": "0.00",
+      "balance": "148.00",
+      "note": "actual expense: supplier"
+    },
+    {
+      "time": "T3",
+      "event_id": "EXP-RENT",
+      "account": "B",
+      "debit": "250.00",
+      "credit": "0.00",
+      "balance": "250.00",
+      "note": "actual expense: rent"
+    }
+  ],
+  "trial_balance": {
+    "opening": "650.00",
+    "settled_income": "800.00",
+    "paid_expenses": "850.00",
+    "fees": "2.00",
+    "in_transit": "200.00",
+    "account_total": "398.00",
+    "check": "0.00"
+  }
+}

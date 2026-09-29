@@ -1,0 +1,97 @@
+{
+  "accounts": [
+    {
+      "id": "A",
+      "name": "operating account",
+      "opening_balance": "600.00"
+    },
+    {
+      "id": "B",
+      "name": "reserve account",
+      "opening_balance": "50.00"
+    }
+  ],
+  "time_points": [
+    "T0",
+    "T1",
+    "T2",
+    "T3"
+  ],
+  "flows": [
+    {
+      "id": "INC-A-T1",
+      "account": "A",
+      "time": "T1",
+      "direction": "income",
+      "amount": "300.00",
+      "description": "customer receipt"
+    },
+    {
+      "id": "INC-B-T2",
+      "account": "B",
+      "time": "T2",
+      "direction": "income",
+      "amount": "500.00",
+      "description": "subsidiary collection"
+    },
+    {
+      "id": "EXP-WAGES",
+      "account": "A",
+      "time": "T0",
+      "direction": "expense",
+      "amount": "150.00",
+      "priority": 1,
+      "description": "wages"
+    },
+    {
+      "id": "EXP-TAX",
+      "account": "B",
+      "time": "T1",
+      "direction": "expense",
+      "amount": "300.00",
+      "priority": 1,
+      "description": "tax"
+    },
+    {
+      "id": "EXP-SUPPLIER",
+      "account": "A",
+      "time": "T2",
+      "direction": "expense",
+      "amount": "400.00",
+      "priority": 2,
+      "description": "supplier"
+    },
+    {
+      "id": "EXP-RENT",
+      "account": "B",
+      "time": "T3",
+      "direction": "expense",
+      "amount": "250.00",
+      "priority": 3,
+      "description": "rent"
+    }
+  ],
+  "transfer_rules": [
+    {
+      "id": "A-TO-B-1",
+      "source": "A",
+      "destination": "B",
+      "delay": 1,
+      "fee_rate": "0.01",
+      "fixed_fee": "0.00"
+    },
+    {
+      "id": "B-TO-A-1",
+      "source": "B",
+      "destination": "A",
+      "delay": 1,
+      "fee_rate": "0.02",
+      "fixed_fee": "1.00"
+    }
+  ],
+  "planning": {
+    "transfer_step": "50.00",
+    "max_transfers_per_period": 2,
+    "max_search_nodes": 50000
+  }
+}

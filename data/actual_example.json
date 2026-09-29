@@ -1,0 +1,13 @@
+{
+  "note": "Execution delay: the planned T0 transfer is initiated at T1, so it cannot pay the T1 tax.",
+  "actual_transfers": [
+    {
+      "transfer_id": "ACT-0001",
+      "rule_id": "A-TO-B-1",
+      "principal": "200.00",
+      "initiate_time": "T1"
+    }
+  ],
+  "executed_income": [],
+  "executed_expenses": []
+}
