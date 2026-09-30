@@ -65,6 +65,10 @@ class Plan:
     payment_decisions: list[dict] = field(default_factory=list)        # 支付决策：准时/推迟/未满足
     rule_amendments: list[dict] = field(default_factory=list)          # 生效的费率调整
     expected_inflows: list[dict] = field(default_factory=list)         # 修订时刻确认的后续收入
+    selected_strategy: str = "strict_due"
+    payment_strategy_options: list[dict] = field(default_factory=list)
+    feasibility_status: str = ""
+    schedule_basis: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -83,6 +87,10 @@ class Plan:
             "payment_decisions": self.payment_decisions,
             "rule_amendments": self.rule_amendments,
             "expected_inflows": self.expected_inflows,
+            "selected_strategy": self.selected_strategy,
+            "payment_strategy_options": self.payment_strategy_options,
+            "feasibility_status": self.feasibility_status,
+            "schedule_basis": self.schedule_basis,
         }
 
     @classmethod
@@ -99,6 +107,10 @@ class Plan:
             [TransferOrder.from_dict(o) for o in d.get("fixed_transit", [])],
             d.get("payment_decisions", []), d.get("rule_amendments", []),
             d.get("expected_inflows", []),
+            d.get("selected_strategy", "strict_due"),
+            d.get("payment_strategy_options", []),
+            d.get("feasibility_status", ""),
+            d.get("schedule_basis", {}),
         )
 
     def save(self, path: str | Path) -> Path:

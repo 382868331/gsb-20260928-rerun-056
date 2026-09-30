@@ -85,8 +85,25 @@ def reconciliation(result: ReplayResult, scenario: Scenario) -> str:
     return "\n".join(lines)
 
 
-_STATUS_CN = {"on_time": "准时支付", "deferred": "推迟可选支付",
-              "late_paid": "延误后补付", "unmet": "未满足"}
+_STATUS_CN = {"on_time": "准时支付", "deferred": "窗口内改期支付",
+              "late_paid": "延误后补付", "true_shortfall": "真正不足",
+              "unmet": "未满足",
+              "strategy_not_adopted": "当前策略未采用可行改期",
+              "search_incomplete": "尚未找到方案"}
+
+
+def payment_strategy_report(plan: Plan) -> str:
+    if not plan.payment_strategy_options:
+        return "支付优先级方案对照：无支付窗口"
+    lines = ["支付优先级方案对照:"]
+    for o in plan.payment_strategy_options:
+        moved = ", ".join(f"{fid}:{day}" for fid, day in o["rescheduled_date"].items())
+        lines.append(
+            f"  {o['strategy']} #{o['rank']} [{_STATUS_CN.get(o['status'], o['status'])}] "
+            f"改期 {moved or '无'} 费用 {o['total_fee']} 最终缺口 {o['final_gap']}")
+    if plan.feasibility_status:
+        lines.append(f"  结论：{_STATUS_CN.get(plan.feasibility_status, plan.feasibility_status)}")
+    return "\n".join(lines)
 
 
 def revision_summary(plan: Plan) -> str:
@@ -96,6 +113,8 @@ def revision_summary(plan: Plan) -> str:
         f"  新增/保留调拨 {len(plan.orders)} 笔，总手续费 {plan.total_fee}，"
         f"目标元组 {tuple(plan.objective)}",
     ]
+    if plan.payment_strategy_options:
+        lines.append(payment_strategy_report(plan))
     if plan.fixed_transit:
         lines.append("  已发起保持在途（不再从原账户重扣）:")
         for o in plan.fixed_transit:

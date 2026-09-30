@@ -209,13 +209,23 @@ class SolveResult:
 
 def solve(scenario: Scenario, solver_name: str = "greedy",
           fixed_orders: list[TransferOrder] | None = None,
-          id_prefix: str = "T") -> SolveResult:
+          id_prefix: str = "T",
+          schedule_windows: bool = True,
+          eligible_strategies: list[str] | None = None) -> SolveResult:
     """逐缺口贪心：始终处理最早、最高优先的缺口，选费用最低的可行链。
 
     fixed_orders 为重规划时已确定的调拨（如修订时刻仍在途的资金）：
     它们不再参与候选，但在每次重放时固定附加，求解器只能补差额。
     """
     scenario.validate()
+    if schedule_windows and any(
+            f.kind == FlowKind.OUTFLOW and (f.window_start is not None or
+                                     f.window_end is not None)
+            for f in scenario.flows):
+        from .scheduler import solve_with_windows
+        return solve_with_windows(scenario, fixed_orders=fixed_orders,
+                                  id_prefix=id_prefix,
+                                  eligible_strategies=eligible_strategies)[0]
     orders: list[TransferOrder] = list(fixed_orders or [])
     abandoned: set[str] = set()
     fixed_ids = {o.order_id for o in orders}

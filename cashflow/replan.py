@@ -22,6 +22,7 @@ from decimal import Decimal
 from .engine import ReplayResult, add_days, daterange, replay, solve
 from .ledger import Ledger, TransferLeg
 from .models import FlowKind, Priority, money
+from .models import TransferRule
 from .plan import ActualInflow, Execution, Plan, TransferOrder
 from .scenario import Scenario
 
@@ -64,11 +65,11 @@ def _amend_rules(scenario: Scenario, amendments: list[FeeAmendment],
         if a is None:
             rules.append(r)
         else:
-            object.__setattr__(r, "fee_rate",
-                               r.fee_rate if a.fee_rate is None else a.fee_rate)
-            object.__setattr__(r, "fee_fixed",
-                               r.fee_fixed if a.fee_fixed is None else a.fee_fixed)
-            rules.append(r)
+            rules.append(TransferRule(
+                r.source, r.target, r.lag_days,
+                r.fee_rate if a.fee_rate is None else a.fee_rate,
+                r.fee_fixed if a.fee_fixed is None else a.fee_fixed,
+                r.min_amount, r.max_amount))
     scenario.transfer_rules = rules
     return scenario
 
@@ -98,7 +99,7 @@ def build_prefix(scenario: Scenario, execution: Execution,
                 continue  # 延迟到 cutoff 之后，或确认未到
             prefix_flows.append(CashFlow(
                 f.flow_id, f.account_id, act.actual_date, f.kind, act.amount,
-                f.priority, f.memo))
+                f.priority, f.memo, f.window_start, f.window_end))
         else:
             prefix_flows.append(f)
     prefix_sc = _Sc(
@@ -156,12 +157,13 @@ def _residual_scenario(scenario: Scenario, prefix: ReplayResult,
                 residual_flows.append(CashFlow(
                     f.flow_id, f.account_id, new_date, f.kind, money(unpaid),
                     f.priority,
-                    f"{f.memo}（{f.date} 到期，延误后补付）"))
+                    f"{f.memo}（{f.date} 到期，延误后补付）",
+                    new_date, new_date))
             else:
                 new_date = outflow_shifts.get(f.flow_id, f.date)
                 residual_flows.append(CashFlow(
                     f.flow_id, f.account_id, new_date, f.kind, f.amount,
-                    f.priority, f.memo))
+                    f.priority, f.memo, f.window_start, f.window_end))
         else:  # 收入
             act = actuals.get(f.flow_id)
             if f.date <= cutoff_date:
@@ -169,7 +171,8 @@ def _residual_scenario(scenario: Scenario, prefix: ReplayResult,
                 if act is not None and act.actual_date >= first_day and act.amount > 0:
                     residual_flows.append(CashFlow(
                         f.flow_id, f.account_id, act.actual_date, f.kind,
-                        act.amount, f.priority, f.memo))
+                        act.amount, f.priority, f.memo,
+                        f.window_start, f.window_end))
                 continue
             new_date, new_amount = f.date, f.amount
             if f.flow_id in inflow_updates:
@@ -177,7 +180,7 @@ def _residual_scenario(scenario: Scenario, prefix: ReplayResult,
             if new_amount > 0:
                 residual_flows.append(CashFlow(
                     f.flow_id, f.account_id, new_date, f.kind, money(new_amount),
-                    f.priority, f.memo))
+                    f.priority, f.memo, f.window_start, f.window_end))
 
     residual = Scenario(
         scenario.scenario_id + "@residual", first_day, scenario.end_date,
@@ -202,7 +205,9 @@ def _fixed_transit_orders(prefix: ReplayResult) -> list[TransferOrder]:
 
 def _decisions_for(scenario: Scenario, result: ReplayResult,
                    carry: dict[str, dict], chain_quote,
-                   deferred: dict[str, str]) -> list[dict]:
+                   deferred: dict[str, str],
+                   feasibility_status: str = "",
+                   flow_status: dict[str, str] | None = None) -> list[dict]:
     """逐笔支付给出决策：met（准时/补付）、deferred、unmet，并写明理由。"""
     paid = {p.flow_id: p for p in result.ledger.payments}
     decisions = []
@@ -218,9 +223,25 @@ def _decisions_for(scenario: Scenario, result: ReplayResult,
                 "memo": f.memo}
         if p is None or p.shortfall > 0:
             shortfall = f.amount if p is None else p.shortfall
-            status = "unmet"
-            reason = ("余额、在途资金与后续收入均无法在推演期内覆盖，"
-                      "保持缺口，不重复占用已发起资金")
+            flow_feasibility = (flow_status or {}).get(
+                f.flow_id, feasibility_status)
+            if not flow_feasibility:
+                status = "unmet"
+                reason = ("当前求解策略未能覆盖该支出；未提供可搜索的支付窗口，"
+                          "保持缺口，不重复占用已发起资金")
+            elif flow_feasibility == "strategy_not_adopted":
+                status = "strategy_not_adopted"
+                reason = ("当前支付优先级策略未采用窗口内可足额安排；"
+                          "本策略下保留部分支付/缺口，不代表资金真正不足")
+            elif flow_feasibility == "search_limit_exceeded" or \
+                    flow_feasibility == "search_incomplete":
+                status = "search_incomplete"
+                reason = ("已达到支付日组合枚举上限，尚未找到可足额安排；"
+                          "不能据此断言整个允许窗口内真正不足")
+            else:
+                status = "true_shortfall"
+                reason = ("已完整枚举允许支付窗口：余额、在途资金与后续收入"
+                          "均无法覆盖，确认为真正不足")
             decisions.append({**base, "status": status,
                               "paid": str(Decimal("0") if p is None else p.paid),
                               "shortfall": str(money(shortfall)),
@@ -280,6 +301,20 @@ def _try_defer_p3(scenario: Scenario, fixed: list[TransferOrder],
     return best_orders, best_result, shifts, reasons
 
 
+def _with_outflow_dates(scenario: Scenario, dates: dict[str, str]) -> Scenario:
+    from .models import CashFlow
+    if not dates:
+        return scenario
+    return Scenario(
+        scenario.scenario_id, scenario.start_date, scenario.end_date,
+        list(scenario.accounts),
+        [CashFlow(f.flow_id, f.account_id, dates.get(f.flow_id, f.date),
+                  f.kind, f.amount, f.priority, f.memo,
+                  f.window_start, f.window_end)
+         if f.kind == FlowKind.OUTFLOW else f for f in scenario.flows],
+        list(scenario.transfer_rules), scenario.description)
+
+
 def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
            cutoff_date: str,
            amendments: list[FeeAmendment] | None = None,
@@ -299,23 +334,36 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
         inflow_updates, outflow_shifts)
     fixed = _fixed_transit_orders(prefix)
 
-    first = solve(residual, fixed_orders=fixed, id_prefix="R")
-    residual_scenario = residual
+    eligible_strategies = None if allow_defer_p3 else ["strict_due"]
+    first = solve(residual, fixed_orders=fixed, id_prefix="R",
+                  eligible_strategies=eligible_strategies)
+    selected_dates = first.plan.schedule_basis.get("scheduled_date", {})
+    residual_scenario = _with_outflow_dates(residual, selected_dates)
     orders, result = first.plan.orders, first.replay
     deferred: dict[str, str] = {}
-    if allow_defer_p3:
+    has_windows = any(f.window_start is not None or f.window_end is not None
+                      for f in residual.flows if f.kind == FlowKind.OUTFLOW)
+    if allow_defer_p3 and not has_windows:
         orders, result, shifts, reasons = _try_defer_p3(residual, fixed, first)
         if shifts:
             residual_scenario, _ = _residual_scenario(
                 scenario, prefix, execution, cutoff_date, amendments,
                 inflow_updates, {**outflow_shifts, **shifts})
             deferred = reasons
+    elif selected_dates:
+        for fid, day in selected_dates.items():
+            original = first.plan.schedule_basis["original_due_date"][fid]
+            if day != original:
+                deferred[fid] = (f"在允许支付窗口内从原期限 {original} 改期至 {day}，"
+                                 "用后续到账资金足额支付")
     preloaded_ids = {o.order_id for o in fixed}
     final = replay(residual_scenario, fixed + orders, snapshot_daily=True,
                    preloaded_ids=preloaded_ids)
 
     decisions = _decisions_for(residual_scenario, final,
-                               aux["carry"], chain_quote, deferred)
+                               aux["carry"], chain_quote, deferred,
+                               first.plan.feasibility_status,
+                               first.plan.schedule_basis.get("flow_feasibility"))
 
     by_pri = final.gap_total_by_priority()
     total_fee = money(sum((o.fee for o in orders), Decimal("0")))
@@ -347,6 +395,10 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
         payment_decisions=decisions,
         rule_amendments=[a.to_dict() for a in amendments],
         expected_inflows=expected,
+        selected_strategy=first.plan.selected_strategy,
+        payment_strategy_options=first.plan.payment_strategy_options,
+        feasibility_status=first.plan.feasibility_status,
+        schedule_basis=first.plan.schedule_basis,
     )
     return ReplanResult(plan=revised, residual_replay=final, prefix_replay=prefix)
 
@@ -365,6 +417,9 @@ def combined_replay(scenario: Scenario, execution: Execution, revised: Plan,
     actuals = _actual_map(execution)
     cutoff = revised.cutoff_date
     first_day = add_days(cutoff, 1)
+    scheduled_dates = revised.schedule_basis.get("scheduled_date", {})
+    revised_inflows = {f["flow_id"]: (f["expected_date"], Decimal(f["amount"]))
+                       for f in revised.expected_inflows}
 
     flows = []
     for f in scenario.flows:
@@ -374,16 +429,27 @@ def combined_replay(scenario: Scenario, execution: Execution, revised: Plan,
                 if act is None or act.amount == 0:
                     continue
                 flows.append(CashFlow(f.flow_id, f.account_id, act.actual_date,
-                                      f.kind, act.amount, f.priority, f.memo))
+                                      f.kind, act.amount, f.priority, f.memo,
+                                      f.window_start, f.window_end))
+            elif f.flow_id in revised_inflows:
+                nd, amt = revised_inflows[f.flow_id]
+                if amt > 0:
+                    flows.append(CashFlow(f.flow_id, f.account_id, nd,
+                                          f.kind, amt, f.priority, f.memo,
+                                          f.window_start, f.window_end))
             elif f.flow_id in inflow_updates:
                 nd, amt = inflow_updates[f.flow_id]
                 if amt > 0:
                     flows.append(CashFlow(f.flow_id, f.account_id, nd,
-                                          f.kind, amt, f.priority, f.memo))
+                                          f.kind, amt, f.priority, f.memo,
+                                          f.window_start, f.window_end))
             else:
                 flows.append(f)
         else:
-            flows.append(f)
+            nd = scheduled_dates.get(f.flow_id, f.date)
+            flows.append(CashFlow(f.flow_id, f.account_id, nd, f.kind, f.amount,
+                                  f.priority, f.memo, f.window_start,
+                                  f.window_end))
     full = Scenario(
         scenario.scenario_id + "@combined", scenario.start_date,
         scenario.end_date, list(scenario.accounts), flows,

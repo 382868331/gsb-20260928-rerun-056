@@ -18,7 +18,6 @@ __all__ = [
     "Plan",
     "Execution",
     "TransferOrder",
-    "PaymentOrder",
     "simulate_baseline",
     "solve",
     "SolveResult",

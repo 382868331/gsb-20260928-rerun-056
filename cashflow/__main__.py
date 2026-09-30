@@ -15,7 +15,7 @@ from .engine import replay
 from .plan import Plan
 from .plan import Execution
 from .report import daily_ledger, event_log, gap_report, plan_summary, reconciliation
-from .report import revision_summary
+from .report import payment_strategy_report, revision_summary
 from .repo import Repository
 from .scenario import Scenario
 from .replan import FeeAmendment, replan, combined_replay
@@ -89,6 +89,8 @@ def main() -> None:
         path = repo.save_plan(plan)
         print(plan_summary(plan))
         print()
+        print(payment_strategy_report(plan))
+        print()
         print(gap_report(plan))
         print(f"\n计划已保存：{path}")
 
@@ -123,6 +125,8 @@ def main() -> None:
         repo = Repository(args.data_dir)
         path = repo.save_plan(rr.plan)
         print(revision_summary(rr.plan))
+        print()
+        print(payment_strategy_report(rr.plan))
         print()
         print(daily_ledger(rr.residual_replay))
         full = combined_replay(scenario, execution, rr.plan, inflow_updates)

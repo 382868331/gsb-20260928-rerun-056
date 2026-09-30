@@ -41,10 +41,21 @@ class CashFlow:
     amount: Decimal                # 恒为正数
     priority: int = Priority.P2_NORMAL
     memo: str = ""
+    # 支出允许支付窗口。date 始终保留输入的原始期限，不改写历史输入。
+    window_start: str | None = None
+    window_end: str | None = None
 
     @property
     def signed_amount(self) -> Decimal:
         return self.amount if self.kind == FlowKind.INFLOW else -self.amount
+
+    @property
+    def payment_start(self) -> str:
+        return self.window_start or self.date
+
+    @property
+    def payment_end(self) -> str:
+        return self.window_end or self.date
 
 
 @dataclass(frozen=True)
