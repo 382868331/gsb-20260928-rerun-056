@@ -13,9 +13,13 @@ from pathlib import Path
 from . import brute_force_solve, simulate_baseline, solve
 from .engine import replay
 from .plan import Plan
+from .plan import Execution
 from .report import daily_ledger, event_log, gap_report, plan_summary, reconciliation
+from .report import revision_summary
 from .repo import Repository
 from .scenario import Scenario
+from .replan import FeeAmendment, replan, combined_replay
+from decimal import Decimal
 
 
 def _print_gaps(gaps) -> None:
@@ -51,6 +55,21 @@ def main() -> None:
     p_rep.add_argument("scenario")
     p_rep.add_argument("plan")
 
+    p_rev = sub.add_parser("replan", help="按实际执行与变动生成修订剩余计划")
+    p_rev.add_argument("scenario")
+    p_rev.add_argument("original_plan")
+    p_rev.add_argument("execution")
+    p_rev.add_argument("cutoff")
+    p_rev.add_argument("--amend", action="append", default=[],
+                       metavar="S,T,YYYY-MM-DD,rate,fixed",
+                       help="费率调整，可多次；rate/fixed 填空表示不变")
+    p_rev.add_argument("--inflow", action="append", default=[],
+                       metavar="FLOW_ID,YYYY-MM-DD,amount",
+                       help="修订未来收入到账日/金额，可多次")
+    p_rev.add_argument("--no-defer-p3", action="store_true",
+                       help="不允许推迟可选支付")
+    p_rev.add_argument("--data-dir", default="data")
+
     args = parser.parse_args()
 
     if args.cmd == "baseline":
@@ -82,6 +101,34 @@ def main() -> None:
         print(daily_ledger(result))
         print()
         print(reconciliation(result, scenario))
+
+    elif args.cmd == "replan":
+        scenario = _load_scenario(args.scenario)
+        original = Plan.load(args.original_plan)
+        execution = Execution.load(args.execution)
+        amendments = []
+        for item in args.amend:
+            src, tgt, eff, rate, fixed = item.split(",")
+            amendments.append(FeeAmendment(
+                src, tgt, eff,
+                None if rate == "" else Decimal(rate),
+                None if fixed == "" else Decimal(fixed)))
+        inflow_updates = {}
+        for item in args.inflow:
+            fid, day, amount = item.split(",")
+            inflow_updates[fid] = (day, Decimal(amount))
+        rr = replan(scenario, original, execution, args.cutoff,
+                    amendments=amendments, inflow_updates=inflow_updates,
+                    allow_defer_p3=not args.no_defer_p3)
+        repo = Repository(args.data_dir)
+        path = repo.save_plan(rr.plan)
+        print(revision_summary(rr.plan))
+        print()
+        print(daily_ledger(rr.residual_replay))
+        full = combined_replay(scenario, execution, rr.plan, inflow_updates)
+        print()
+        print(reconciliation(full, scenario))
+        print(f"\n修订计划与执行记录分开保存：{path}")
 
 
 if __name__ == "__main__":

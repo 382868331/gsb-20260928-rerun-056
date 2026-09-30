@@ -6,6 +6,7 @@ from .plan import Plan, Execution, TransferOrder
 from .engine import simulate_baseline, solve, SolveResult
 from .solver_brute import brute_force_solve
 from .ledger import Ledger, LedgerError
+from .replan import FeeAmendment, replan, combined_replay, build_prefix
 
 __all__ = [
     "Account",
@@ -24,4 +25,5 @@ __all__ = [
     "brute_force_solve",
     "Ledger",
     "LedgerError", "money",
+    "FeeAmendment", "replan", "combined_replay", "build_prefix",
 ]

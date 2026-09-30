@@ -83,3 +83,40 @@ def reconciliation(result: ReplayResult, scenario: Scenario) -> str:
     led.verify_conservation()
     lines.append("  核对结果：资金守恒，全部账户余额非负。")
     return "\n".join(lines)
+
+
+_STATUS_CN = {"on_time": "准时支付", "deferred": "推迟可选支付",
+              "late_paid": "延误后补付", "unmet": "未满足"}
+
+
+def revision_summary(plan: Plan) -> str:
+    """修订计划摘要：修订关系、保持在途、费率调整、逐笔支付决策与理由。"""
+    lines = [
+        f"修订计划（修订自 {plan.revision_of}，cutoff={plan.cutoff_date}）:",
+        f"  新增/保留调拨 {len(plan.orders)} 笔，总手续费 {plan.total_fee}，"
+        f"目标元组 {tuple(plan.objective)}",
+    ]
+    if plan.fixed_transit:
+        lines.append("  已发起保持在途（不再从原账户重扣）:")
+        for o in plan.fixed_transit:
+            lines.append(f"    {o.order_id}: {o.source}->{o.target} "
+                         f"本金 {o.principal}，{o.arrival_date} 到账")
+    if plan.rule_amendments:
+        lines.append("  费率调整（对 cutoff 后新发起调拨生效）:")
+        for a in plan.rule_amendments:
+            rate = a["fee_rate"] if a["fee_rate"] is not None else "不变"
+            fixed = a["fee_fixed"] if a["fee_fixed"] is not None else "不变"
+            lines.append(f"    {a['source']}->{a['target']} 自 {a['effective_date']} "
+                         f"比例费率 {rate}，固定费 {fixed}")
+    lines.append("  后续确认收入:")
+    for f in plan.expected_inflows:
+        lines.append(f"    {f['expected_date']} {f['flow_id']} "
+                     f"账户 {f['account_id']} +{f['amount']}")
+    lines.append("  逐笔支付决策:")
+    for d in plan.payment_decisions:
+        lines.append(
+            f"    [{_STATUS_CN.get(d['status'], d['status'])}] "
+            f"{d['scheduled_date']} {d['flow_id']} P{d['priority']} "
+            f"应付 {d['due']} 实付 {d['paid']} 缺口 {d['shortfall']}")
+        lines.append(f"      理由：{d['reason']}")
+    return "\n".join(lines)

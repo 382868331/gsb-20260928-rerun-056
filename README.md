@@ -1,8 +1,41 @@
 # 资金流动推演系统（首轮）
+# 资金流动推演系统
 
 根据虚构账户、已知收支和账户间调拨限制，按日推演未来各时段的资金缺口，
 产出可按时间重放的调拨计划；场景、计划、实际执行记录分别持久化。
 后续轮次在此基础上加入融资选择。
+
+## 第二轮：调拨延误后的修订重规划
+
+实际执行与计划出现偏差（两跳调拨中途延误、收入部分未到、手续费提高）后，
+系统以 cutoff 日终真实状态为起点，给出**可执行的剩余计划**，而不是重跑整段：
+
+- **已发出的资金保持在途**：cutoff 时仍在途的调拨记为 `fixed_transit`，
+  残差重放只在到账日补入账，本金/手续费**不会再从原账户扣第二次**；
+  未发起的计划调拨自动作废，只对真正缺的钱重新筹资（新单号 `R***`）。
+- **期限与费用逐笔重估**：残差场景以真实余额/在途为期初，收入可按实际
+  到账日与金额改写（部分到账、延迟、未到）；`FeeAmendment` 让手续费提高
+  仅对 cutoff 之后**新发起**的调拨生效，延误单仍按原费用。
+- **两类允许的选择，理由逐条记录**（`payment_decisions`）：
+  - `deferred`：P3 可选支付推迟到后续资金到账日，并写明缺口与等待的资金；
+  - `on_time`：采用更贵但及时的路径时，写明准时路径与最便宜路径的费用差；
+  - `late_paid`：延误导致错过原期限后的补付；`unmet`：仍无法覆盖的缺口。
+- **执行与修订分开存档、重开可对账**：实际执行 `Execution`（含实际调拨、
+  已发起单号、实际收入）与修订计划 `Plan(revision_of=…)` 分别落盘；
+  `combined_replay` 从期初一路串起重放，单本账满足资金守恒并逐日可核。
+
+新增模块/命令：
+
+- `cashflow/replan.py`：`replan()`、`build_prefix()`、`combined_replay()`、
+  `FeeAmendment`。
+- `Plan` 扩展 `revision_of/cutoff_date/fixed_transit/payment_decisions/
+  rule_amendments/expected_inflows`；`Execution` 扩展 `initiated_order_ids`
+  与 `actual_inflows`（`ActualInflow`）。
+- `python -m cashflow replan <场景> <原计划> <执行记录> <cutoff>
+  --amend S,T,日期,费率,固定费 --inflow 收入号,日期,金额 [--no-defer-p3]`
+- `examples/run_revision_demo.py`：两跳中途延误 + 回款仅到 300 + C→B
+  费率升至 2% 的全过程：工资/房租改走贵但及时的直达路径，可选采购
+  推迟到尾款日，每日余额与重开后资金守恒全部核对通过。
 
 ## 核心约束
 
@@ -38,6 +71,7 @@
 .venv/bin/python -m cashflow baseline data/scenarios/demo01.json
 .venv/bin/python -m cashflow solve data/scenarios/demo01.json --brute
 .venv/bin/python -m cashflow replay data/scenarios/demo01.json <plan.json>
+.venv/bin/python -m examples.run_revision_demo       # 第二轮：延误后修订重规划
 ```
 
 ## 小例子结论（2026-10-01 至 10-08）
