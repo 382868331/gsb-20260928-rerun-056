@@ -64,6 +64,7 @@ class Ledger:
     opening: dict[str, Decimal]
     balances: dict[str, Decimal] = field(default_factory=dict)
     in_transit: dict[str, TransferLeg] = field(default_factory=dict)
+    opening_transit: Decimal = Decimal("0")  # 窗口开始时已在途的本金
     total_fees: Decimal = Decimal("0")
     payments: list[PaymentResult] = field(default_factory=list)
     snapshots: list[DaySnapshot] = field(default_factory=list)
@@ -74,6 +75,11 @@ class Ledger:
     @classmethod
     def open(cls, opening: dict[str, Decimal]) -> "Ledger":
         return cls(opening=dict(opening), balances=dict(opening))
+
+    def seed_transit(self, legs) -> None:
+        for leg in legs:
+            self.in_transit[leg.order_id] = leg
+            self.opening_transit += leg.principal
 
     def available(self, account_id: str) -> Decimal:
         return self.balances.get(account_id, Decimal("0"))
@@ -140,7 +146,8 @@ class Ledger:
         transit_total = sum((leg.principal for leg in self.in_transit.values()),
                             Decimal("0"))
         lhs = balance_total + transit_total + self.total_fees
-        rhs = opening_total + self.total_inflows - self.total_paid
+        rhs = (opening_total + self.opening_transit + self.total_inflows
+               - self.total_paid)
         if money(lhs) != money(rhs):
             raise LedgerError(
                 f"资金账不平：余额{balance_total}+在途{transit_total}+费{self.total_fees}"

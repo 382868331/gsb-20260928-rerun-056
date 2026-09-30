@@ -8,7 +8,7 @@ from decimal import Decimal
 from itertools import count
 
 from .ledger import Ledger, LedgerError, PaymentResult, TransferLeg
-from .models import FlowKind, Priority, money
+from .models import CashFlow, FlowKind, Priority, money
 from .plan import Plan, TransferOrder
 from .scenario import Scenario
 
@@ -41,28 +41,67 @@ class ReplayResult:
 
 def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
            legs: list[TransferLeg] | None = None,
-           snapshot_daily: bool = False) -> ReplayResult:
-    """按日期重放。orders 为计划时与 legs 二选一；legs 可用于执行记录。"""
-    scenario.validate()
+           snapshot_daily: bool = False,
+           inflow_overrides: dict | None = None,
+           outflow_overrides: dict | None = None,
+           preload_legs: list[TransferLeg] | None = None) -> ReplayResult:
+    """按日期重放。orders 为计划时与 legs 二选一；legs 可用于执行记录。
+
+    inflow_overrides: {flow_id: (actual_date, actual_amount) 或 None}
+        None 表示截至窗口结束仍未到账（不到账）。
+    outflow_overrides: {flow_id: new_due_date}，用于可选支出推迟。
+    preload_legs: 窗口开始前已发起、窗口开始时仍在途的调拨；其发起不在
+        本窗口扣款（本金已离开原账户），仅处理到账。
+    """
+    scenario.validate(check_dates=False)
     if legs is None:
         legs = Ledger.legs_from_orders(orders or [])
-    leg_ids = [leg.order_id for leg in legs]
+    inflow_overrides = inflow_overrides or {}
+    outflow_overrides = outflow_overrides or {}
+    preload_legs = preload_legs or []
+    leg_ids = [leg.order_id for leg in preload_legs] + [leg.order_id for leg in legs]
     if len(set(leg_ids)) != len(leg_ids):
         raise LedgerError("调拨单号重复")
 
     inflows: dict[str, list] = {}
     outflows: dict[str, list] = {}
     for f in scenario.flows:
-        (inflows if f.kind == FlowKind.INFLOW else outflows).setdefault(
-            f.date, []).append(f)
+        if f.kind == FlowKind.INFLOW:
+            if f.flow_id in inflow_overrides:
+                actual = inflow_overrides[f.flow_id]
+                if actual is None:
+                    continue  # 截至本窗口结束未到账
+                adate, aamount = actual
+                if not (scenario.start_date <= adate <= scenario.end_date):
+                    continue  # 落在窗口外（截断前已处理或窗口后）
+                f = CashFlow(f.flow_id, f.account_id, adate, f.kind, aamount,
+                             f.priority, f.memo)
+            inflows.setdefault(f.date, []).append(f)
+        else:
+            new_date = outflow_overrides.get(f.flow_id, f.date)
+            if not (scenario.start_date <= new_date <= scenario.end_date):
+                continue  # 推迟到窗口外
+            f = CashFlow(f.flow_id, f.account_id, new_date, f.kind, f.amount,
+                         f.priority, f.memo)
+            outflows.setdefault(f.date, []).append(f)
     initiations: dict[str, list[TransferLeg]] = {}
     arrivals: dict[str, list[TransferLeg]] = {}
     for leg in legs:
+        if leg.initiate_date < scenario.start_date:
+            raise LedgerError(
+                f"调拨 {leg.order_id} 发起日 {leg.initiate_date} 早于窗口开始，"
+                f"应作为在途预载而非窗口内发起")
         initiations.setdefault(leg.initiate_date, []).append(leg)
+        arrivals.setdefault(leg.arrival_date, []).append(leg)
+    for leg in preload_legs:
+        if leg.arrival_date < scenario.start_date:
+            raise LedgerError(
+                f"预载调拨 {leg.order_id} 到账日 {leg.arrival_date} 早于窗口开始")
         arrivals.setdefault(leg.arrival_date, []).append(leg)
 
     ledger = Ledger.open({a.account_id: a.opening_balance
                           for a in scenario.accounts})
+    ledger.seed_transit(preload_legs)
     gaps: list[PaymentResult] = []
     for day in daterange(scenario.start_date, scenario.end_date):
         for f in sorted(inflows.get(day, []), key=lambda x: x.flow_id):
@@ -193,29 +232,67 @@ class SolveResult:
     replay: ReplayResult
 
 
-def solve(scenario: Scenario, solver_name: str = "greedy") -> SolveResult:
+def solve(scenario: Scenario, solver_name: str = "greedy",
+          fixed_legs: list[TransferLeg] | None = None,
+          preload_legs: list[TransferLeg] | None = None,
+          order_prefix: str = "T",
+          inflow_overrides: dict | None = None,
+          outflow_overrides: dict | None = None) -> SolveResult:
     """逐缺口贪心：始终处理最早、最高优先的缺口，选费用最低的可行链。"""
     scenario.validate()
     orders: list[TransferOrder] = []
     abandoned: set[str] = set()
-    id_gen = (f"T{i:03d}" for i in count(1))
+    fixed_legs = fixed_legs or []
+    preload_legs = preload_legs or []
+    id_gen = (f"{order_prefix}{i:03d}" for i in count(1))
+
+    def run(extra_orders, snapshot_daily: bool = False):
+        return replay(scenario, extra_orders,
+                      legs=fixed_legs if fixed_legs else None,
+                      preload_legs=preload_legs if preload_legs else None,
+                      inflow_overrides=inflow_overrides,
+                      outflow_overrides=outflow_overrides,
+                      snapshot_daily=snapshot_daily)
+
+    def _obj(extra_orders):
+        try:
+            result = run(extra_orders)
+        except LedgerError:
+            return None
+        by_pri = result.gap_total_by_priority()
+        fee = sum((o.fee for o in extra_orders), Decimal("0"))
+        score = (by_pri[int(Priority.P1_CRITICAL)],
+                 by_pri[int(Priority.P2_NORMAL)],
+                 by_pri[int(Priority.P3_OPTIONAL)],
+                 fee)
+        return score, result
 
     for _ in range(200):
-        result = replay(scenario, orders)
+        result = run(orders)
         pending = [g for g in result.gaps if g.flow_id not in abandoned]
         if not pending:
             break
         gap = sorted(pending, key=lambda g: (g.date, g.priority, g.flow_id))[0]
         need = money(gap.shortfall)
 
+        # 候选链枚举只用于看路径/金额/日期；评估时给每条链临时重编号，
+        # 既不与已有订单撞号，也避免不可行链消耗正式单号。
         chains = _enumerate_chains(scenario, gap.account_id, need,
-                                   gap.date, id_gen)
+                                   gap.date, (f"L{i:03d}" for i in count(1)))
         best = None
         best_score = None
-        base_score, _ = _objective(scenario, orders)
-        for chain in sorted(chains, key=lambda c: (c.fee, len(c.orders))):
-            trial = orders + chain.orders
-            scored = _objective(scenario, trial)
+        base_score = _obj(orders)[0]
+        existing = {o.order_id for o in orders}
+        for cand_idx, chain in enumerate(
+                sorted(chains, key=lambda c: (c.fee, len(c.orders)))):
+            renumbered = []
+            for hop_idx, o in enumerate(chain.orders):
+                tmp = f"C{cand_idx:02d}H{hop_idx:02d}"
+                object.__setattr__(o, "order_id", tmp)
+                renumbered.append(o)
+            assert not ({o.order_id for o in renumbered} & existing)
+            trial = orders + renumbered
+            scored = _obj(trial)
             if scored is None:
                 continue
             score, _ = scored
@@ -226,9 +303,13 @@ def solve(scenario: Scenario, solver_name: str = "greedy") -> SolveResult:
         if best is None:
             abandoned.add(gap.flow_id)
             continue
-        orders.extend(best.orders)
+        chosen = []
+        for o in best.orders:
+            object.__setattr__(o, "order_id", next(id_gen))
+            chosen.append(o)
+        orders.extend(chosen)
 
-    final = replay(scenario, orders, snapshot_daily=True)
+    final = run(orders, snapshot_daily=True)
     by_pri = final.gap_total_by_priority()
     total_fee = money(sum((o.fee for o in orders), Decimal("0")))
     remaining = [

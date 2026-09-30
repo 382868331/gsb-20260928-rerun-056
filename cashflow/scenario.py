@@ -45,7 +45,7 @@ class Scenario:
         return None
 
     # ---- 校验 ----
-    def validate(self) -> None:
+    def validate(self, check_dates: bool = True) -> None:
         if not (self.start_date <= self.end_date):
             raise ScenarioError("start_date 必须不晚于 end_date")
         ids = self.account_ids
@@ -61,7 +61,7 @@ class Scenario:
             seen_flow.add(f.flow_id)
             if f.account_id not in ids:
                 raise ScenarioError(f"收支 {f.flow_id} 引用了未知账户 {f.account_id}")
-            if not (self.start_date <= f.date <= self.end_date):
+            if check_dates and not (self.start_date <= f.date <= self.end_date):
                 raise ScenarioError(f"收支 {f.flow_id} 日期 {f.date} 超出推演区间")
             if f.kind not in (FlowKind.INFLOW, FlowKind.OUTFLOW):
                 raise ScenarioError(f"收支 {f.flow_id} 类型非法: {f.kind}")

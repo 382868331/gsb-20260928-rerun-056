@@ -123,6 +123,70 @@ class ActualTransfer:
         )
 
 
+@dataclass(frozen=True)
+class ActualInflow:
+    """一条收入的实际到账记录；金额可为部分到账，日期可推迟。"""
+
+    flow_id: str
+    account_id: str
+    scheduled_date: str       # 场景中的原定到账日
+    actual_date: str          # 实际到账日（晚于原定即延误）
+    scheduled_amount: Decimal
+    actual_amount: Decimal    # 小于原定即部分到账
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["scheduled_amount"] = str(self.scheduled_amount)
+        d["actual_amount"] = str(self.actual_amount)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ActualInflow":
+        return cls(
+            d["flow_id"], d["account_id"], d["scheduled_date"],
+            d["actual_date"], money(d["scheduled_amount"]),
+            money(d["actual_amount"]),
+        )
+
+
+@dataclass(frozen=True)
+class RuleChange:
+    """调拨规则在某日生效的变化（如手续费上调、到账变慢）。
+
+    仅对生效日及之后新发起的调拨有效；在途调拨沿用发起时的条件。
+    """
+
+    source: str
+    target: str
+    effective_date: str
+    lag_days: int | None = None
+    fee_rate: Decimal | None = None
+    fee_fixed: Decimal | None = None
+    max_amount: Decimal | None = None
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        if self.fee_rate is not None:
+            d["fee_rate"] = str(self.fee_rate)
+        if self.fee_fixed is not None:
+            d["fee_fixed"] = str(self.fee_fixed)
+        if self.max_amount is not None:
+            d["max_amount"] = str(self.max_amount)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RuleChange":
+        return cls(
+            d["source"], d["target"], d["effective_date"],
+            d.get("lag_days"),
+            None if d.get("fee_rate") is None else Decimal(d["fee_rate"]),
+            None if d.get("fee_fixed") is None else Decimal(d["fee_fixed"]),
+            None if d.get("max_amount") is None else Decimal(d["max_amount"]),
+            d.get("note", ""),
+        )
+
+
 @dataclass
 class Execution:
     """实际执行记录，与计划分开保存，供下一轮做计划 vs 实际差异分析。"""
@@ -131,6 +195,8 @@ class Execution:
     plan_created_at: str
     recorded_at: str
     actual_transfers: list[ActualTransfer] = field(default_factory=list)
+    actual_inflows: list[ActualInflow] = field(default_factory=list)
+    rule_changes: list[RuleChange] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -138,6 +204,8 @@ class Execution:
             "plan_created_at": self.plan_created_at,
             "recorded_at": self.recorded_at,
             "actual_transfers": [t.to_dict() for t in self.actual_transfers],
+            "actual_inflows": [f.to_dict() for f in self.actual_inflows],
+            "rule_changes": [c.to_dict() for c in self.rule_changes],
         }
 
     @classmethod
@@ -145,6 +213,8 @@ class Execution:
         return cls(
             d["scenario_id"], d["plan_created_at"], d["recorded_at"],
             [ActualTransfer.from_dict(t) for t in d.get("actual_transfers", [])],
+            [ActualInflow.from_dict(f) for f in d.get("actual_inflows", [])],
+            [RuleChange.from_dict(c) for c in d.get("rule_changes", [])],
         )
 
     def save(self, path: str | Path) -> Path:
@@ -160,3 +230,79 @@ class Execution:
         return cls.from_dict(
             json.loads(Path(str_or_path).read_text(encoding="utf-8"))
         )
+
+
+@dataclass
+class RevisedPlan:
+    """在某个截断日（重开日）早晨，基于已发生事实给出的剩余可执行计划。
+
+    - committed_orders：截断日之前已发起的调拨（含仍在途），保持原样，
+      重规划不得再次动用其已离开原账户的本金；在途笔在 revised_orders 之外
+      单独保存，用于全程对账。
+    - revised_orders：截断日起新安排（或原计划保留、或改走更贵路径）的调拨。
+    - deferrals：被推迟的可选（P3）支出及推迟到的日期、理由。
+    - choices：路径/取舍选择的逐条理由（如更贵但及时）。
+    - remaining_gaps：修订后仍无法满足的支出。
+    """
+
+    scenario_id: str
+    base_plan_created_at: str
+    revision_no: int
+    created_at: str
+    cutoff_date: str
+    committed_orders: list[ActualTransfer] = field(default_factory=list)
+    revised_orders: list[TransferOrder] = field(default_factory=list)
+    deferrals: list[dict] = field(default_factory=list)
+    choices: list[dict] = field(default_factory=list)
+    remaining_gaps: list[dict] = field(default_factory=list)
+    total_fee: Decimal = Decimal("0")
+    objective: tuple[int, ...] = (0, 0, 0, 0)
+    notes: str = ""
+
+    @property
+    def in_transit_orders(self) -> list[ActualTransfer]:
+        """截断日早晨仍在途（实际到账日 >= 截断日）的已发起调拨。"""
+        return [t for t in self.committed_orders
+                if t.status != "cancelled" and t.actual_arrival_date >= self.cutoff_date]
+
+    def to_dict(self) -> dict:
+        return {
+            "scenario_id": self.scenario_id,
+            "base_plan_created_at": self.base_plan_created_at,
+            "revision_no": self.revision_no,
+            "created_at": self.created_at,
+            "cutoff_date": self.cutoff_date,
+            "committed_orders": [t.to_dict() for t in self.committed_orders],
+            "revised_orders": [o.to_dict() for o in self.revised_orders],
+            "deferrals": self.deferrals,
+            "choices": self.choices,
+            "remaining_gaps": self.remaining_gaps,
+            "total_fee": str(self.total_fee),
+            "objective": list(self.objective),
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RevisedPlan":
+        return cls(
+            d["scenario_id"], d["base_plan_created_at"],
+            int(d.get("revision_no", 1)), d["created_at"], d["cutoff_date"],
+            [ActualTransfer.from_dict(t) for t in d.get("committed_orders", [])],
+            [TransferOrder.from_dict(o) for o in d.get("revised_orders", [])],
+            d.get("deferrals", []), d.get("choices", []),
+            d.get("remaining_gaps", []), money(d.get("total_fee", "0")),
+            tuple(d.get("objective", [0, 0, 0, 0])), d.get("notes", ""),
+        )
+
+    def save(self, path: str | Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path) -> "RevisedPlan":
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))

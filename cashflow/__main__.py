@@ -12,8 +12,10 @@ from pathlib import Path
 
 from . import brute_force_solve, simulate_baseline, solve
 from .engine import replay
-from .plan import Plan
-from .report import daily_ledger, event_log, gap_report, plan_summary, reconciliation
+from .plan import Execution, Plan, RevisedPlan
+from .report import (daily_ledger, event_log, gap_report, plan_summary,
+                     reconciliation, revision_summary)
+from .replan import replay_full, revise_plan
 from .repo import Repository
 from .scenario import Scenario
 
@@ -51,6 +53,16 @@ def main() -> None:
     p_rep.add_argument("scenario")
     p_rep.add_argument("plan")
 
+    p_rev = sub.add_parser("revise", help="基于实际执行记录重规划剩余计划")
+    p_rev.add_argument("scenario")
+    p_rev.add_argument("execution")
+    p_rev.add_argument("--cutoff", required=True, help="重开日（截断日）YYYY-MM-DD")
+    p_rev.add_argument("--revision", type=int, default=1)
+    p_rev.add_argument("--plan", default=None, help="原始计划 json，缺省取仓储中最新")
+    p_rev.add_argument("--data-dir", default="data")
+    p_rev.add_argument("--no-defer", action="store_true",
+                       help="不允许推迟可选(P3)支付")
+
     args = parser.parse_args()
 
     if args.cmd == "baseline":
@@ -82,6 +94,28 @@ def main() -> None:
         print(daily_ledger(result))
         print()
         print(reconciliation(result, scenario))
+
+    elif args.cmd == "revise":
+        scenario = _load_scenario(args.scenario)
+        execution = Execution.load(args.execution)
+        if args.plan:
+            base_plan = Plan.load(args.plan)
+        else:
+            repo = Repository(args.data_dir)
+            base_plan = repo.latest_plan(scenario.scenario_id)
+            if base_plan is None:
+                raise SystemExit("找不到原始计划，请用 --plan 指定")
+        rr = revise_plan(scenario, base_plan, execution, args.cutoff,
+                         revision_no=args.revision, allow_defer=not args.no_defer)
+        print(revision_summary(rr.revision))
+        print()
+        full = replay_full(scenario, execution, rr.revision)
+        print(daily_ledger(full))
+        print()
+        print(reconciliation(full, scenario))
+        repo = Repository(args.data_dir)
+        path = repo.save_revision(rr.revision)
+        print(f"\n修订计划已与执行记录分开保存：{path}")
 
 
 if __name__ == "__main__":

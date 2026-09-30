@@ -9,6 +9,44 @@ from .plan import Plan
 from .scenario import Scenario
 
 
+def revision_summary(revision) -> str:
+    lines = [
+        f"修订计划 rev{revision.revision_no}（截断日 {revision.cutoff_date} 早晨）:",
+        f"  已发起且不再重复占用 {len(revision.committed_orders)} 笔"
+        f"（其中在途 {len(revision.in_transit_orders)} 笔）；"
+        f"新增调拨 {len(revision.revised_orders)} 笔；总手续费 {revision.total_fee}",
+        f"  目标元组 (P1缺口分,P2缺口分,P3缺口分,新增费用分) = "
+        f"{tuple(revision.objective)}",
+    ]
+    for t in revision.committed_orders:
+        mark = "在途" if t in revision.in_transit_orders else "已到账"
+        lines.append(
+            f"  [实际-{mark}] {t.order_id}: {t.actual_initiate_date} 发起 "
+            f"{t.source}->{t.target} 本金 {t.actual_principal} 费 {t.actual_fee}"
+            f"，{t.actual_arrival_date} 到账")
+    for o in revision.revised_orders:
+        lines.append(
+            f"  [新增] {o.order_id}: {o.initiate_date} 发起 {o.source}->{o.target} "
+            f"本金 {o.principal} 费 {o.fee}，{o.arrival_date} 到账")
+    for d in revision.deferrals:
+        lines.append(
+            f"  [推迟] {d['flow_id']}(P3) {d['original_date']} -> "
+            f"{d['deferred_to']}：{d['reason']}")
+    for c in revision.choices:
+        lines.append(f"  [选择理由] {c['order_id']} {c['source']}->{c['target']} "
+                     f"本金 {c['principal']} 费 {c['fee']}：{c['reason']}")
+    if not revision.remaining_gaps:
+        lines.append("  未满足部分：无")
+    else:
+        lines.append("  未满足部分:")
+        for g in revision.remaining_gaps:
+            lines.append(
+                f"    {g['date']} {g['flow_id']} 账户 {g['account_id']} "
+                f"P{g['priority']} 应付 {g['due']} 已付 {g['paid']} "
+                f"缺口 {g['shortfall']}")
+    return "\n".join(lines)
+
+
 def event_log(result: ReplayResult) -> str:
     lines = ["按时间可重放的事件清单（过账顺序：收入 -> 调拨发起 -> 调拨到账 -> 支出）:"]
     for e in result.ledger.log:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .plan import Execution, Plan
+from .plan import Execution, Plan, RevisedPlan
 from .scenario import Scenario
 
 
@@ -25,7 +25,9 @@ class Repository:
         self.scenarios_dir = self.root / "scenarios"
         self.plans_dir = self.root / "plans"
         self.executions_dir = self.root / "executions"
-        for d in (self.scenarios_dir, self.plans_dir, self.executions_dir):
+        self.revisions_dir = self.root / "revisions"
+        for d in (self.scenarios_dir, self.plans_dir, self.executions_dir,
+                  self.revisions_dir):
             d.mkdir(parents=True, exist_ok=True)
 
     # ---- 场景 ----
@@ -63,3 +65,23 @@ class Repository:
     def list_executions(self, scenario_id: str) -> list[Path]:
         prefix = f"{_safe(scenario_id)}__"
         return sorted(self.executions_dir.glob(f"{prefix}*.json"))
+
+    def latest_execution(self, scenario_id: str) -> Execution | None:
+        paths = self.list_executions(scenario_id)
+        return Execution.load(paths[-1]) if paths else None
+
+    # ---- 修订计划（与原始计划、执行记录分开保存）----
+    def save_revision(self, revision: RevisedPlan) -> Path:
+        tag = (f"{_safe(revision.scenario_id)}__rev{revision.revision_no:02d}"
+               f"__{_safe(revision.created_at)}")
+        path = self.revisions_dir / f"{tag}.json"
+        revision.save(path)
+        return path
+
+    def list_revisions(self, scenario_id: str) -> list[Path]:
+        prefix = f"{_safe(scenario_id)}__"
+        return sorted(self.revisions_dir.glob(f"{prefix}*.json"))
+
+    def latest_revision(self, scenario_id: str) -> RevisedPlan | None:
+        paths = self.list_revisions(scenario_id)
+        return RevisedPlan.load(paths[-1]) if paths else None
