@@ -41,10 +41,18 @@ class CashFlow:
     amount: Decimal                # 恒为正数
     priority: int = Priority.P2_NORMAL
     memo: str = ""
+    # 仅支出：允许支付窗口的最后一日（含）。空表示必须在 date 当日支付。
+    # date 始终是输入的原始期限（original due date），任何改期都不改写它。
+    pay_window_end: str = ""
 
     @property
     def signed_amount(self) -> Decimal:
         return self.amount if self.kind == FlowKind.INFLOW else -self.amount
+
+    @property
+    def window_end(self) -> str:
+        """支出允许支付的最后一日；无窗口时即原应付日。"""
+        return self.pay_window_end or self.date
 
 
 @dataclass(frozen=True)

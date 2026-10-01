@@ -11,12 +11,17 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .plan import Execution, Plan
+from .plan import Adoption, Execution, Plan
 from .scenario import Scenario
 
 
 def _safe(name: str) -> str:
     return re.sub(r"[^0-9A-Za-z_\-]+", "_", name)
+
+
+def _base_id(scenario_id: str) -> str:
+    """去掉内部排期/残差标签（@fastest_feasible 等），落盘用原始场景 id。"""
+    return scenario_id.split("@", 1)[0]
 
 
 class Repository:
@@ -25,28 +30,32 @@ class Repository:
         self.scenarios_dir = self.root / "scenarios"
         self.plans_dir = self.root / "plans"
         self.executions_dir = self.root / "executions"
-        for d in (self.scenarios_dir, self.plans_dir, self.executions_dir):
+        self.adoptions_dir = self.root / "adoptions"
+        for d in (self.scenarios_dir, self.plans_dir, self.executions_dir,
+                  self.adoptions_dir):
             d.mkdir(parents=True, exist_ok=True)
 
     # ---- 场景 ----
     def save_scenario(self, scenario: Scenario) -> Path:
-        return scenario.save(self.scenarios_dir / f"{_safe(scenario.scenario_id)}.json")
+        return scenario.save(
+            self.scenarios_dir / f"{_safe(_base_id(scenario.scenario_id))}.json")
 
     def load_scenario(self, scenario_id: str) -> Scenario:
-        return Scenario.load(self.scenarios_dir / f"{_safe(scenario_id)}.json")
+        return Scenario.load(
+            self.scenarios_dir / f"{_safe(_base_id(scenario_id))}.json")
 
     def list_scenarios(self) -> list[str]:
         return sorted(p.stem for p in self.scenarios_dir.glob("*.json"))
 
     # ---- 计划 ----
     def save_plan(self, plan: Plan) -> Path:
-        tag = f"{_safe(plan.scenario_id)}__{_safe(plan.created_at)}"
+        tag = f"{_safe(_base_id(plan.scenario_id))}__{_safe(plan.created_at)}"
         path = self.plans_dir / f"{tag}.json"
         plan.save(path)
         return path
 
     def list_plans(self, scenario_id: str) -> list[Path]:
-        prefix = f"{_safe(scenario_id)}__"
+        prefix = f"{_safe(_base_id(scenario_id))}__"
         return sorted(self.plans_dir.glob(f"{prefix}*.json"))
 
     def latest_plan(self, scenario_id: str) -> Plan | None:
@@ -55,11 +64,28 @@ class Repository:
 
     # ---- 执行 ----
     def save_execution(self, execution: Execution) -> Path:
-        tag = f"{_safe(execution.scenario_id)}__{_safe(execution.recorded_at)}"
+        tag = (f"{_safe(_base_id(execution.scenario_id))}__"
+               f"{_safe(execution.recorded_at)}")
         path = self.executions_dir / f"{tag}.json"
         execution.save(path)
         return path
 
     def list_executions(self, scenario_id: str) -> list[Path]:
-        prefix = f"{_safe(scenario_id)}__"
+        prefix = f"{_safe(_base_id(scenario_id))}__"
         return sorted(self.executions_dir.glob(f"{prefix}*.json"))
+
+    # ---- 采纳记录 ----
+    def save_adoption(self, adoption: Adoption) -> Path:
+        tag = (f"{_safe(_base_id(adoption.scenario_id))}__"
+               f"{_safe(adoption.adopted_at)}")
+        path = self.adoptions_dir / f"{tag}.json"
+        adoption.save(path)
+        return path
+
+    def list_adoptions(self, scenario_id: str) -> list[Path]:
+        prefix = f"{_safe(_base_id(scenario_id))}__"
+        return sorted(self.adoptions_dir.glob(f"{prefix}*.json"))
+
+    def load_plan_by_created_at(self, scenario_id: str, created_at: str) -> Plan:
+        tag = f"{_safe(_base_id(scenario_id))}__{_safe(created_at)}.json"
+        return Plan.load(self.plans_dir / tag)

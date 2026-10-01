@@ -71,6 +71,15 @@ class Scenario:
                 raise ScenarioError(f"收入 {f.flow_id} 不应设置优先级")
             if f.kind == FlowKind.OUTFLOW and f.priority not in tuple(Priority):
                 raise ScenarioError(f"支出 {f.flow_id} 优先级非法")
+            if f.kind == FlowKind.INFLOW and f.pay_window_end:
+                raise ScenarioError(f"收入 {f.flow_id} 不应设置支付窗口")
+            if f.kind == FlowKind.OUTFLOW and f.pay_window_end:
+                if f.pay_window_end < f.date:
+                    raise ScenarioError(
+                        f"支出 {f.flow_id} 支付窗口末日早于应付日")
+                if f.pay_window_end > self.end_date:
+                    raise ScenarioError(
+                        f"支出 {f.flow_id} 支付窗口末日超出推演区间")
         pairs: set[tuple[str, str]] = set()
         for r in self.transfer_rules:
             if r.source not in ids or r.target not in ids:
@@ -102,7 +111,8 @@ class Scenario:
             "flows": [
                 {"flow_id": f.flow_id, "account_id": f.account_id, "date": f.date,
                  "kind": f.kind, "amount": str(f.amount),
-                 "priority": int(f.priority), "memo": f.memo}
+                 "priority": int(f.priority), "memo": f.memo,
+                 "pay_window_end": f.pay_window_end}
                 for f in self.flows
             ],
             "transfer_rules": [
@@ -125,7 +135,7 @@ class Scenario:
             CashFlow(
                 f["flow_id"], f["account_id"], f["date"], f["kind"],
                 money(f["amount"]), int(f.get("priority", Priority.P2_NORMAL)),
-                f.get("memo", ""),
+                f.get("memo", ""), f.get("pay_window_end", ""),
             )
             for f in data.get("flows", [])
         ]

@@ -1,9 +1,49 @@
-# 资金流动推演系统（首轮）
+# 资金流动推演系统（第三轮：支付窗口、策略对照与采纳复演）
 # 资金流动推演系统
 
 根据虚构账户、已知收支和账户间调拨限制，按日推演未来各时段的资金缺口，
 产出可按时间重放的调拨计划；场景、计划、实际执行记录分别持久化。
 后续轮次在此基础上加入融资选择。
+
+## 第三轮：支付窗口内寻找实际可执行安排
+
+资金计划把窗口内本可足额支付的采购提前安排为部分支付、并声称“整个期间都付
+不起”，而手动改到稍晚日期却能足额完成。第三轮在**允许的支付窗口**内搜索
+实际可执行安排，并把结论严格分成三类（不再用一句“资金不足”盖过）：
+
+- **`truly_unmet`（真正不足）**：枚举窗口内全部支付日组合，余额、在途与窗口
+  内可到收入都无法足额覆盖；仍按可用余额部分支付，缺口保留。
+- **`strategy_not_used`（当前策略未采用）**：存在窗口内可足额支付的安排，但
+  当前优先级策略（如坚持原期限）没有选择它；更换策略/改期即可覆盖。
+- **`no_solution_found`（尚未找到方案）**：搜索空间超过枚举预算被截断，既未
+  证明可行也未证明不可行；避免把“没搜到”误报成“真正不足”。
+
+其他要点：
+
+- **输入的原始期限永不改写**：`CashFlow.date` 始终是原应付日，窗口用
+  `pay_window_end` 表示；所有改期只体现在排期与支付决策里
+  （`original_due_date` 与 `scheduled_date` 并列）。
+- **三种支付优先级方案对照**：`strict_due`（坚持原期限）、
+  `fastest_feasible`（窗口内最早足额日）、`lowest_fee`（可等收入到账以最小化
+  手续费）；同表展示每笔改期、总费用与最终缺口。
+- **综合压力场景逐日守恒**：收入推迟 + 费率变化 + 部分支付同时发生时，仍走
+  同一本时序账；已在途的 FIXED 单只在到账日入账，**本金/手续费不重扣**。
+- **采纳后旧计划与依据冻结**：采纳只新增一条 `Adoption` 记录，旧计划文件
+  及其 `basis` 依据快照（原场景/cutoff/费率与收入修订/策略）原样保留；
+  重开后 `diff` 分别重放两版，对出逐日余额、支付日、费用与缺口差异。
+
+新增模块/命令：
+
+- `cashflow/scheduling.py`：`run_strategy()`、`compare_strategies()`、
+  窗口可行性枚举与三分类。
+- `cashflow/adoption.py`：`adopt()`、`replay_version()`、`diff_versions()`。
+- `Plan` 扩展 `strategy/payment_schedule/basis`；新增 `Adoption`。
+- `python -m cashflow schedule <场景>`：三策略对照。
+- `replan ... --window-strategy strict_due|fastest_feasible|lowest_fee`。
+- `python -m cashflow adopt <场景> <采纳版时间> --superseded <旧版时间>`
+- `python -m cashflow diff <场景> <旧版时间> <新版时间> [--execution 执行记录]`
+- `examples/run_window_demo.py`：窗口改期足额、真不足/策略未采用对照、
+  采纳与差异复演，以及延误+部分到账+费率变化叠加窗口的逐日守恒核对。
 
 ## 第二轮：调拨延误后的修订重规划
 
@@ -60,8 +100,11 @@
 - `cashflow/plan.py`：计划 `Plan` 与实际执行 `Execution`，分文件保存
 - `cashflow/repo.py`：`data/scenarios|plans|executions/` 三类数据分目录
 - `cashflow/report.py`：事件清单、每日各账户资金账、缺口位置、对账报表
+- `cashflow/scheduling.py`：支付窗口排期、可行性枚举与三分类、多策略对照
+- `cashflow/adoption.py`：采纳登记、按版本重放、两版逐日差异对照
 - `examples/run_demo.py`：三账户小例子，枚举与贪心对拍
 - `tests/`：11 个单元测试
+- `tests/test_window.py`：第三轮 9 个测试（窗口排期/三分类/综合守恒/采纳复演）
 
 ## 运行
 
@@ -72,6 +115,8 @@
 .venv/bin/python -m cashflow solve data/scenarios/demo01.json --brute
 .venv/bin/python -m cashflow replay data/scenarios/demo01.json <plan.json>
 .venv/bin/python -m examples.run_revision_demo       # 第二轮：延误后修订重规划
+.venv/bin/python -m examples.run_window_demo         # 第三轮：窗口/策略/采纳
+.venv/bin/python -m cashflow schedule data/scenarios/demo03.json
 ```
 
 ## 小例子结论（2026-10-01 至 10-08）

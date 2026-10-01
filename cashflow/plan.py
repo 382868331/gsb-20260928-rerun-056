@@ -65,6 +65,14 @@ class Plan:
     payment_decisions: list[dict] = field(default_factory=list)        # 支付决策：准时/推迟/未满足
     rule_amendments: list[dict] = field(default_factory=list)          # 生效的费率调整
     expected_inflows: list[dict] = field(default_factory=list)         # 修订时刻确认的后续收入
+    # ---- 第三轮：支付窗口、策略与依据快照 ----
+    strategy: str = ""                 # 生成该计划所用支付优先级策略
+    payment_schedule: dict = field(default_factory=dict)  # flow_id -> 安排支付日
+    basis: dict = field(default_factory=dict)
+    # basis: 计划生成当时的依据冻结快照，结构
+    #   {"scenario": <场景dict>, "inflow_updates": {...},
+    #    "amendments": [...], "cutoff_date": str, "revision_of": str}
+    # 采纳修订后旧计划及其依据文件保持不变，重开时据此复演两者差异。
 
     def to_dict(self) -> dict:
         return {
@@ -83,6 +91,9 @@ class Plan:
             "payment_decisions": self.payment_decisions,
             "rule_amendments": self.rule_amendments,
             "expected_inflows": self.expected_inflows,
+            "strategy": self.strategy,
+            "payment_schedule": self.payment_schedule,
+            "basis": self.basis,
         }
 
     @classmethod
@@ -99,6 +110,8 @@ class Plan:
             [TransferOrder.from_dict(o) for o in d.get("fixed_transit", [])],
             d.get("payment_decisions", []), d.get("rule_amendments", []),
             d.get("expected_inflows", []),
+            d.get("strategy", ""), d.get("payment_schedule", {}),
+            d.get("basis", {}),
         )
 
     def save(self, path: str | Path) -> Path:
@@ -211,3 +224,42 @@ class Execution:
         return cls.from_dict(
             json.loads(Path(str_or_path).read_text(encoding="utf-8"))
         )
+
+
+@dataclass
+class Adoption:
+    """用户对某份修订/排期计划的采纳记录（第三轮）。
+
+    采纳动作不修改旧计划文件：旧计划与其 basis 快照原样保留；本记录只登记
+    "采纳了哪份新计划、替代哪份旧计划、以及当时的备注"，重开后据此把两份
+    计划分别重放并对出逐日差异。
+    """
+
+    scenario_id: str
+    adopted_created_at: str     # 被采纳计划的 Plan.created_at
+    superseded_created_at: str  # 被替代旧计划的 Plan.created_at（可为空）
+    adopted_at: str
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Adoption":
+        return cls(
+            d["scenario_id"], d["adopted_created_at"],
+            d["superseded_created_at"], d["adopted_at"],
+            d.get("note", ""))
+
+    def save(self, path: str | Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Adoption":
+        return cls.from_dict(
+            json.loads(Path(path).read_text(encoding="utf-8")))

@@ -7,6 +7,14 @@ from .engine import simulate_baseline, solve, SolveResult
 from .solver_brute import brute_force_solve
 from .ledger import Ledger, LedgerError
 from .replan import FeeAmendment, replan, combined_replay, build_prefix
+from .scheduling import (
+    STRICT as WINDOW_STRICT,
+    FASTEST as WINDOW_FASTEST,
+    LOWEST_FEE as WINDOW_LOWEST_FEE,
+    compare_strategies, run_strategy, StrategyOutcome,
+)
+from .adoption import adopt, diff_versions, replay_version, VersionDiff
+from .plan import Adoption
 
 __all__ = [
     "Account",
@@ -18,7 +26,6 @@ __all__ = [
     "Plan",
     "Execution",
     "TransferOrder",
-    "PaymentOrder",
     "simulate_baseline",
     "solve",
     "SolveResult",
@@ -26,4 +33,7 @@ __all__ = [
     "Ledger",
     "LedgerError", "money",
     "FeeAmendment", "replan", "combined_replay", "build_prefix",
+    "WINDOW_STRICT", "WINDOW_FASTEST", "WINDOW_LOWEST_FEE",
+    "compare_strategies", "run_strategy", "StrategyOutcome",
+    "Adoption", "adopt", "diff_versions", "replay_version", "VersionDiff",
 ]

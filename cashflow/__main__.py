@@ -15,10 +15,13 @@ from .engine import replay
 from .plan import Plan
 from .plan import Execution
 from .report import daily_ledger, event_log, gap_report, plan_summary, reconciliation
-from .report import revision_summary
+from .report import revision_summary, strategy_comparison
 from .repo import Repository
 from .scenario import Scenario
 from .replan import FeeAmendment, replan, combined_replay
+from .scheduling import compare_strategies
+from .adoption import adopt, diff_versions
+from .plan import Adoption
 from decimal import Decimal
 
 
@@ -68,7 +71,28 @@ def main() -> None:
                        help="修订未来收入到账日/金额，可多次")
     p_rev.add_argument("--no-defer-p3", action="store_true",
                        help="不允许推迟可选支付")
+    p_rev.add_argument("--window-strategy",
+                       choices=["strict_due", "fastest_feasible", "lowest_fee"],
+                       help="在支出允许支付窗口内搜索排期，并三分类缺口")
     p_rev.add_argument("--data-dir", default="data")
+
+    p_sch = sub.add_parser("schedule", help="支付窗口内多策略排期对照")
+    p_sch.add_argument("scenario")
+    p_sch.add_argument("--data-dir", default="data")
+
+    p_adopt = sub.add_parser("adopt", help="登记采纳某计划（旧计划文件不变）")
+    p_adopt.add_argument("scenario")
+    p_adopt.add_argument("adopted_created_at")
+    p_adopt.add_argument("--superseded", default="")
+    p_adopt.add_argument("--note", default="")
+    p_adopt.add_argument("--data-dir", default="data")
+
+    p_diff = sub.add_parser("diff", help="复演并对出两版计划差异")
+    p_diff.add_argument("scenario")
+    p_diff.add_argument("old_created_at")
+    p_diff.add_argument("new_created_at")
+    p_diff.add_argument("--execution", default="")
+    p_diff.add_argument("--data-dir", default="data")
 
     args = parser.parse_args()
 
@@ -119,7 +143,8 @@ def main() -> None:
             inflow_updates[fid] = (day, Decimal(amount))
         rr = replan(scenario, original, execution, args.cutoff,
                     amendments=amendments, inflow_updates=inflow_updates,
-                    allow_defer_p3=not args.no_defer_p3)
+                    allow_defer_p3=not args.no_defer_p3,
+                    window_strategy=args.window_strategy)
         repo = Repository(args.data_dir)
         path = repo.save_plan(rr.plan)
         print(revision_summary(rr.plan))
@@ -129,6 +154,42 @@ def main() -> None:
         print()
         print(reconciliation(full, scenario))
         print(f"\n修订计划与执行记录分开保存：{path}")
+
+    elif args.cmd == "schedule":
+        repo = Repository(args.data_dir)
+        scenario = _load_scenario(args.scenario)
+        repo.save_scenario(scenario)
+        outcomes = compare_strategies(scenario)
+        for i, o in enumerate(outcomes):
+            o.plan.created_at = f"{o.plan.created_at}#{i:02d}-{o.strategy}"
+            repo.save_plan(o.plan)
+        print(strategy_comparison(outcomes))
+        for o in outcomes:
+            o.replay.ledger.verify_conservation()
+        print("\n各策略计划均通过资金守恒核对，并已分别保存。")
+
+    elif args.cmd == "adopt":
+        repo = Repository(args.data_dir)
+        adopted = repo.load_plan_by_created_at(args.scenario,
+                                               args.adopted_created_at)
+        superseded = (repo.load_plan_by_created_at(args.scenario, args.superseded)
+                      if args.superseded else None)
+        record = adopt(adopted, superseded, note=args.note)
+        path = repo.save_adoption(record)
+        print(f"已登记采纳：{args.adopted_created_at}"
+              + (f"，替代 {args.superseded}" if args.superseded else "")
+              + f"；旧计划文件保持不变。记录：{path}")
+
+    elif args.cmd == "diff":
+        repo = Repository(args.data_dir)
+        old = repo.load_plan_by_created_at(args.scenario, args.old_created_at)
+        new = repo.load_plan_by_created_at(args.scenario, args.new_created_at)
+        execution = Execution.load(args.execution) if args.execution else None
+        scenario = (repo.load_scenario(args.scenario)
+                    if not Path(args.scenario).exists()
+                    else _load_scenario(args.scenario))
+        vd = diff_versions(scenario, old, new, execution)
+        print(vd.summary())
 
 
 if __name__ == "__main__":

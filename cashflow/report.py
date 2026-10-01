@@ -86,7 +86,37 @@ def reconciliation(result: ReplayResult, scenario: Scenario) -> str:
 
 
 _STATUS_CN = {"on_time": "准时支付", "deferred": "推迟可选支付",
-              "late_paid": "延误后补付", "unmet": "未满足"}
+              "late_paid": "延误后补付", "unmet": "未满足",
+              "rescheduled": "窗口内改期足额支付",
+              "truly_unmet": "真正不足（窗口内无法足额）",
+              "strategy_not_used": "当前策略未采用可行安排",
+              "no_solution_found": "尚未找到方案（搜索截断）"}
+
+
+def strategy_comparison(outcomes) -> str:
+    """不同支付优先级方案对照表：改期、费用、最终缺口、三分类。"""
+    lines = ["支付优先级方案对照（同一输入；原始期限保留不改写）:",
+             "  策略                总费用   P1缺口 P2缺口 P3缺口 改期笔数 分类(逐笔缺口)"]
+    for o in outcomes:
+        by_pri = o.replay.gap_total_by_priority()
+        moved = sum(1 for d in o.decisions
+                    if d["status"] == "rescheduled")
+        verdict = ",".join(f"{fid}:{v}"
+                            for fid, v in o.feasibility.items())
+        lines.append(
+            f"  {o.strategy:<18} {o.total_fee!s:<8} "
+            f"{by_pri[1]!s:<6} {by_pri[2]!s:<6} {by_pri[3]!s:<7} "
+            f"{moved:<8} {verdict or '无缺口'}")
+    lines.append("")
+    for o in outcomes:
+        lines.append(f"  [{o.strategy}] 逐笔支付安排:")
+        for d in o.decisions:
+            cn = _STATUS_CN.get(d["status"], d["status"])
+            lines.append(
+                f"    {d['flow_id']} P{d['priority']} 原期限 {d['original_due_date']}"
+                f" 窗口至 {d['window_end']} -> {d['scheduled_date']} 付 {d['paid']}"
+                f" 缺口 {d['shortfall']} [{cn}]")
+    return "\n".join(lines)
 
 
 def revision_summary(plan: Plan) -> str:
