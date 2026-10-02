@@ -268,8 +268,11 @@ def _decisions_for(scenario: Scenario, result: ReplayResult,
 
 
 def _try_defer_p3(scenario: Scenario, fixed: list[TransferOrder],
-                  plan_result) -> tuple[list[TransferOrder], ReplayResult, dict, dict]:
+                  plan_result,
+                  locked: list[TransferOrder] | None = None
+                  ) -> tuple[list[TransferOrder], ReplayResult, dict, dict]:
     """对仍有缺口的 P3 可选支付，尝试推迟到后续有资金的日期；取目标元组最优。"""
+    locked = locked or []
     best_orders, best_result, best_score = (
         plan_result.plan.orders, plan_result.replay,
         tuple(plan_result.plan.objective))
@@ -287,7 +290,8 @@ def _try_defer_p3(scenario: Scenario, fixed: list[TransferOrder],
                  type(f)(f.flow_id, f.account_id, day, f.kind, f.amount,
                          f.priority, f.memo) for f in scenario.flows],
                 list(scenario.transfer_rules), scenario.description)
-            trial = solve(shifted, fixed_orders=fixed, id_prefix="R")
+            trial = solve(shifted, fixed_orders=fixed,
+                          locked_orders=locked, id_prefix="R")
             score = tuple(trial.plan.objective)
             if score < best_score:
                 best_orders, best_result, best_score = (
@@ -321,21 +325,38 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
            inflow_updates: dict[str, tuple[str, Decimal]] | None = None,
            outflow_shifts: dict[str, str] | None = None,
            allow_defer_p3: bool = True,
-           chain_quote: dict | None = None) -> ReplanResult:
+           chain_quote: dict | None = None,
+           locked_orders: list[TransferOrder] | None = None,
+           confirmed_arrangements: list[dict] | None = None,
+           partial_adoption_options: list[dict] | None = None,
+           withdrawn_order_ids: list[str] | None = None,
+           committed_fee: Decimal | None = None) -> ReplanResult:
     """根据实际执行与参数变动，生成可执行的剩余（修订）计划。"""
     amendments = amendments or []
     inflow_updates = inflow_updates or {}
     outflow_shifts = outflow_shifts or {}
     chain_quote = chain_quote or {}
+    withdrawn_order_ids = list(withdrawn_order_ids or [])
 
     prefix = build_prefix(scenario, execution, cutoff_date)
     residual, aux = _residual_scenario(
         scenario, prefix, execution, cutoff_date, amendments,
         inflow_updates, outflow_shifts)
     fixed = _fixed_transit_orders(prefix)
+    executed_ids = set(execution.initiated_order_ids) | {
+        t.order_id for t in execution.actual_transfers
+        if t.status != "cancelled"}
+    inherited_locked = [
+        o for o in original_plan.locked_orders
+        if o.initiate_date > cutoff_date
+        and o.order_id not in withdrawn_order_ids
+        and o.order_id not in executed_ids]
+    locked_orders = list(locked_orders if locked_orders is not None
+                         else inherited_locked)
 
     eligible_strategies = None if allow_defer_p3 else ["strict_due"]
     first = solve(residual, fixed_orders=fixed, id_prefix="R",
+                  locked_orders=locked_orders,
                   eligible_strategies=eligible_strategies)
     selected_dates = first.plan.schedule_basis.get("scheduled_date", {})
     residual_scenario = _with_outflow_dates(residual, selected_dates)
@@ -344,11 +365,10 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
     has_windows = any(f.window_start is not None or f.window_end is not None
                       for f in residual.flows if f.kind == FlowKind.OUTFLOW)
     if allow_defer_p3 and not has_windows:
-        orders, result, shifts, reasons = _try_defer_p3(residual, fixed, first)
+        orders, result, shifts, reasons = _try_defer_p3(
+            residual, fixed, first, locked_orders)
         if shifts:
-            residual_scenario, _ = _residual_scenario(
-                scenario, prefix, execution, cutoff_date, amendments,
-                inflow_updates, {**outflow_shifts, **shifts})
+            residual_scenario = _with_outflow_dates(residual, shifts)
             deferred = reasons
     elif selected_dates:
         for fid, day in selected_dates.items():
@@ -357,8 +377,8 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
                 deferred[fid] = (f"在允许支付窗口内从原期限 {original} 改期至 {day}，"
                                  "用后续到账资金足额支付")
     preloaded_ids = {o.order_id for o in fixed}
-    final = replay(residual_scenario, fixed + orders, snapshot_daily=True,
-                   preloaded_ids=preloaded_ids)
+    final = replay(residual_scenario, fixed + locked_orders + orders,
+                   snapshot_daily=True, preloaded_ids=preloaded_ids)
 
     decisions = _decisions_for(residual_scenario, final,
                                aux["carry"], chain_quote, deferred,
@@ -366,7 +386,11 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
                                first.plan.schedule_basis.get("flow_feasibility"))
 
     by_pri = final.gap_total_by_priority()
-    total_fee = money(sum((o.fee for o in orders), Decimal("0")))
+    new_fee = money(sum((o.fee for o in orders), Decimal("0")))
+    committed_fee = money(committed_fee if committed_fee is not None
+                          else prefix.ledger.total_fees +
+                          sum((o.fee for o in locked_orders), Decimal("0")))
+    total_fee = money(new_fee + committed_fee)
     expected = [
         {"flow_id": f.flow_id, "account_id": f.account_id,
          "expected_date": f.date, "amount": str(f.amount), "memo": f.memo}
@@ -399,6 +423,14 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
         payment_strategy_options=first.plan.payment_strategy_options,
         feasibility_status=first.plan.feasibility_status,
         schedule_basis=first.plan.schedule_basis,
+        locked_orders=sorted(locked_orders,
+                             key=lambda o: (o.initiate_date, o.order_id)),
+        confirmed_arrangements=confirmed_arrangements or
+        original_plan.confirmed_arrangements,
+        partial_adoption_options=partial_adoption_options or
+        original_plan.partial_adoption_options,
+        withdrawn_order_ids=withdrawn_order_ids,
+        committed_fee=committed_fee,
     )
     return ReplanResult(plan=revised, residual_replay=final, prefix_replay=prefix)
 
@@ -466,7 +498,7 @@ def combined_replay(scenario: Scenario, execution: Execution, revised: Plan,
     fixed_ids = {f"FIXED-{o.order_id.split('-', 1)[1]}"
                  for o in revised.fixed_transit}
     # 修订新增订单（在 cutoff 之后发起/到账）
-    for o in revised.orders:
+    for o in [*revised.locked_orders, *revised.orders]:
         legs.append(TransferLeg(
             o.order_id, o.source, o.target, o.initiate_date, o.arrival_date,
             o.principal, o.fee))

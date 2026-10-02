@@ -37,6 +37,29 @@
   费率升至 2% 的全过程：工资/房租改走贵但及时的直达路径，可选采购
   推迟到尾款日，每日余额与重开后资金守恒全部核对通过。
 
+## 第三轮：候选方案的部分采纳与撤回
+
+候选支付安排不必整包采纳。系统支持只确认其中部分调拨或支付日期，再为尚未确认
+的付款重新求解：
+
+- **确认即占用，未发起也不能复用**：部分采纳的调拨保存在
+  `Plan.locked_orders`，重放时仍在其发起日扣本金和手续费；其他方案不能重复
+  使用同一账户余额或调拨能力。`confirmed_arrangements` 记录确认订单、支付范围、
+  金额、费用和可撤回状态。
+- **两个部分采纳选择可对照**：`compare_partial_adoptions()` 分别保留原支付窗口、
+  调拨/费率约束和固定在途，报告确认范围、剩余补差额订单、剩余缺口、费用增加，
+  以及剩余付款是否推迟或失去可行安排。
+- **撤回只影响未执行部分**：`withdraw_arrangements()` 仅释放尚未发起订单；已发起、
+  在途或已到账订单保留，并在 `withdrawal_notes` 说明在途本金按原到账日入账、
+  到账后才可重新使用，已扣手续费不得抹除。
+- **重开继续对账**：`replan()` 自动继承 cutoff 后仍未发起的确认订单；cutoff 前
+  已发起的订单进入 `fixed_transit`，只补到账不重复扣款。`combined_replay()` 会把
+  实际前缀、在途、已确认未发起订单和新增补差额订单放入同一本逐日账。
+
+新增接口位于 `cashflow/adoption.py`：`adopt_partial_arrangements()`、
+`compare_partial_adoptions()`、`withdraw_arrangements()`、
+`replay_with_adoptions()`；新增测试见 `tests/test_partial_adoption.py`。
+
 ## 核心约束
 
 - **支付窗口与原始期限分离**：支出可提供 `window_start/window_end`，`date`

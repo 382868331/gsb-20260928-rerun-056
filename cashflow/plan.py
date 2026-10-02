@@ -69,6 +69,15 @@ class Plan:
     payment_strategy_options: list[dict] = field(default_factory=list)
     feasibility_status: str = ""
     schedule_basis: dict = field(default_factory=dict)
+    # ---- 第三轮：候选方案的部分采纳 ----
+    # 已确认但尚未发起的调拨；重放/重规划时与普通订单一样扣款，因此会实际占用余额。
+    locked_orders: list[TransferOrder] = field(default_factory=list)
+    # 逐笔确认范围：订单、对应支付、确认金额、费用、状态及是否可撤回。
+    confirmed_arrangements: list[dict] = field(default_factory=list)
+    # 两个及以上部分采纳选择的对照（原约束、确认范围、剩余缺口、延迟/费用影响）。
+    partial_adoption_options: list[dict] = field(default_factory=list)
+    withdrawn_order_ids: list[str] = field(default_factory=list)
+    committed_fee: Decimal = Decimal("0")
 
     def to_dict(self) -> dict:
         return {
@@ -91,6 +100,11 @@ class Plan:
             "payment_strategy_options": self.payment_strategy_options,
             "feasibility_status": self.feasibility_status,
             "schedule_basis": self.schedule_basis,
+            "locked_orders": [o.to_dict() for o in self.locked_orders],
+            "confirmed_arrangements": self.confirmed_arrangements,
+            "partial_adoption_options": self.partial_adoption_options,
+            "withdrawn_order_ids": self.withdrawn_order_ids,
+            "committed_fee": str(self.committed_fee),
         }
 
     @classmethod
@@ -111,6 +125,11 @@ class Plan:
             d.get("payment_strategy_options", []),
             d.get("feasibility_status", ""),
             d.get("schedule_basis", {}),
+            [TransferOrder.from_dict(o) for o in d.get("locked_orders", [])],
+            d.get("confirmed_arrangements", []),
+            d.get("partial_adoption_options", []),
+            d.get("withdrawn_order_ids", []),
+            money(d.get("committed_fee", "0")),
         )
 
     def save(self, path: str | Path) -> Path:

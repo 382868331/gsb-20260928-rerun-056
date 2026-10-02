@@ -57,11 +57,13 @@ def _replace_dates(scenario: Scenario, dates: dict[str, str]) -> Scenario:
 
 def _iter_schedules(scenario: Scenario, strategy: str,
                     fixed_orders: list[TransferOrder] | None,
+                    locked_orders: list[TransferOrder] | None,
                     id_prefix: str):
     window_flows = outflows_with_windows(scenario)
     if not window_flows:
         shifted = _replace_dates(scenario, {})
-        result = solve(shifted, fixed_orders=fixed_orders, id_prefix=id_prefix,
+        result = solve(shifted, fixed_orders=fixed_orders,
+                       locked_orders=locked_orders, id_prefix=id_prefix,
                        schedule_windows=False)
         yield ScheduledScenario(shifted, {}), result
         return
@@ -70,7 +72,8 @@ def _iter_schedules(scenario: Scenario, strategy: str,
     for chosen in product(*(domains[f.flow_id] for f in window_flows)):
         dates = dict(zip(domains.keys(), chosen))
         shifted = _replace_dates(scenario, dates)
-        result = solve(shifted, fixed_orders=fixed_orders, id_prefix=id_prefix,
+        result = solve(shifted, fixed_orders=fixed_orders,
+                       locked_orders=locked_orders, id_prefix=id_prefix,
                        schedule_windows=False)
         yield ScheduledScenario(shifted, dates), result
 
@@ -111,6 +114,7 @@ def _option_summary(strategy: str, dates: dict[str, str], scenario: Scenario,
 
 def solve_with_windows(scenario: Scenario,
                        fixed_orders: list[TransferOrder] | None = None,
+                       locked_orders: list[TransferOrder] | None = None,
                        id_prefix: str = "T",
                        strategies: list[str] | None = None,
                        eligible_strategies: list[str] | None = None,
@@ -137,7 +141,8 @@ def solve_with_windows(scenario: Scenario,
             for f in window_flows:
                 exhaustive_by_flow[f.flow_id] = False
         for rank, (scheduled, result) in enumerate(
-                _iter_schedules(scenario, strategy, fixed_orders, id_prefix)):
+                _iter_schedules(scenario, strategy, fixed_orders,
+                                locked_orders, id_prefix)):
             if rank >= max_combinations:
                 break
             summary = _option_summary(strategy, scheduled.dates, scenario,

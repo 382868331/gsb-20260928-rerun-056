@@ -127,6 +127,27 @@ def revision_summary(plan: Plan) -> str:
             fixed = a["fee_fixed"] if a["fee_fixed"] is not None else "不变"
             lines.append(f"    {a['source']}->{a['target']} 自 {a['effective_date']} "
                          f"比例费率 {rate}，固定费 {fixed}")
+    if plan.partial_adoption_options:
+        lines.append("  部分采纳方案对照:")
+        for o in plan.partial_adoption_options:
+            scope = o.get("confirmed_scope", {})
+            delayed = ", ".join(f"{k}->{v}" for k, v in
+                                 o.get("delayed_remaining_payments", {}).items())
+            lines.append(
+                f"    {o.get('name')}: 确认订单 {scope.get('order_ids', [])} "
+                f"确认费 {scope.get('fee', '0.00')}；剩余费用 {o.get('remaining_fee')} "
+                f"总费用 {o.get('total_expected_fee')} 溢价 {o.get('fee_premium', '0.00')} "
+                f"剩余缺口 {o.get('remaining_gap')} 推迟 {delayed or '无'}")
+    if plan.locked_orders:
+        lines.append("  已确认未发起（继续占用账户余额/调拨能力）:")
+        for o in plan.locked_orders:
+            lines.append(f"    {o.order_id}: {o.initiate_date} {o.source}->"
+                         f"{o.target} 本金 {o.principal} 费 {o.fee}")
+    withdrawal = plan.schedule_basis.get("withdrawal_notes")
+    if withdrawal:
+        lines.append("  撤回处理:")
+        for note in withdrawal:
+            lines.append(f"    {note['order_id']} [{note['status']}] {note['handling']}")
     lines.append("  后续确认收入:")
     for f in plan.expected_inflows:
         lines.append(f"    {f['expected_date']} {f['flow_id']} "

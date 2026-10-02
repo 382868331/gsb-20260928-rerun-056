@@ -209,13 +209,14 @@ class SolveResult:
 
 def solve(scenario: Scenario, solver_name: str = "greedy",
           fixed_orders: list[TransferOrder] | None = None,
+          locked_orders: list[TransferOrder] | None = None,
           id_prefix: str = "T",
           schedule_windows: bool = True,
           eligible_strategies: list[str] | None = None) -> SolveResult:
     """逐缺口贪心：始终处理最早、最高优先的缺口，选费用最低的可行链。
 
-    fixed_orders 为重规划时已确定的调拨（如修订时刻仍在途的资金）：
-    它们不再参与候选，但在每次重放时固定附加，求解器只能补差额。
+    fixed_orders 为 cutoff 前已扣款、当前仍在途的资金，只补到账。
+    locked_orders 为已确认但尚未发起的调拨，会正常扣款并占用资金。
     """
     scenario.validate()
     if schedule_windows and any(
@@ -224,15 +225,19 @@ def solve(scenario: Scenario, solver_name: str = "greedy",
             for f in scenario.flows):
         from .scheduler import solve_with_windows
         return solve_with_windows(scenario, fixed_orders=fixed_orders,
+                                  locked_orders=locked_orders,
                                   id_prefix=id_prefix,
                                   eligible_strategies=eligible_strategies)[0]
-    orders: list[TransferOrder] = list(fixed_orders or [])
+    fixed_orders = list(fixed_orders or [])
+    locked_orders = list(locked_orders or [])
+    orders: list[TransferOrder] = fixed_orders + locked_orders
     abandoned: set[str] = set()
-    fixed_ids = {o.order_id for o in orders}
+    preloaded_ids = {o.order_id for o in fixed_orders}
+    locked_ids = {o.order_id for o in locked_orders}
     id_gen = (f"{id_prefix}{i:03d}" for i in count(1))
 
     for _ in range(200):
-        result = replay(scenario, orders, preloaded_ids=fixed_ids)
+        result = replay(scenario, orders, preloaded_ids=preloaded_ids)
         pending = [g for g in result.gaps if g.flow_id not in abandoned]
         if not pending:
             break
@@ -243,10 +248,12 @@ def solve(scenario: Scenario, solver_name: str = "greedy",
                                    gap.date, id_gen)
         best = None
         best_score = None
-        base_score, _ = _objective(scenario, orders, preloaded_ids=fixed_ids)
+        base_score, _ = _objective(scenario, orders,
+                                   preloaded_ids=preloaded_ids)
         for chain in sorted(chains, key=lambda c: (c.fee, len(c.orders))):
             trial = orders + chain.orders
-            scored = _objective(scenario, trial, preloaded_ids=fixed_ids)
+            scored = _objective(scenario, trial,
+                                preloaded_ids=preloaded_ids)
             if scored is None:
                 continue
             score, _ = scored
@@ -259,11 +266,13 @@ def solve(scenario: Scenario, solver_name: str = "greedy",
             continue
         orders.extend(best.orders)
 
-    new_orders = [o for o in orders if o.order_id not in fixed_ids]
+    new_orders = [o for o in orders
+                  if o.order_id not in preloaded_ids
+                  and o.order_id not in locked_ids]
     final = replay(scenario, orders, snapshot_daily=True,
-                   preloaded_ids=fixed_ids)
+                   preloaded_ids=preloaded_ids)
     by_pri = final.gap_total_by_priority()
-    total_fee = money(sum((o.fee for o in orders), Decimal("0")))
+    new_fee = money(sum((o.fee for o in new_orders), Decimal("0")))
     remaining = [
         {"flow_id": g.flow_id, "account_id": g.account_id, "date": g.date,
          "priority": g.priority, "due": str(g.due), "paid": str(g.paid),
@@ -275,11 +284,11 @@ def solve(scenario: Scenario, solver_name: str = "greedy",
         created_at=datetime.now().isoformat(timespec="seconds"),
         orders=sorted(new_orders, key=lambda o: (o.initiate_date, o.order_id)),
         remaining_gaps=remaining,
-        total_fee=total_fee,
+        total_fee=new_fee,
         objective=(int(by_pri[int(Priority.P1_CRITICAL)] * 100),
                    int(by_pri[int(Priority.P2_NORMAL)] * 100),
                    int(by_pri[int(Priority.P3_OPTIONAL)] * 100),
-                   int(total_fee * 100)),
+                   int(new_fee * 100)),
         solver=solver_name,
         notes="目标序：(P1缺口,P2缺口,P3缺口,总手续费)，字典序最小",
     )
