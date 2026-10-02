@@ -63,3 +63,24 @@ class Repository:
     def list_executions(self, scenario_id: str) -> list[Path]:
         prefix = f"{_safe(scenario_id)}__"
         return sorted(self.executions_dir.glob(f"{prefix}*.json"))
+
+    # ---- 部分采纳记录 ----
+    @property
+    def adoptions_dir(self) -> Path:
+        d = self.root / "adoptions"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def save_adoption(self, adoption) -> Path:
+        tag = f"{_safe(adoption.scenario_id)}__{_safe(adoption.adoption_id)}"
+        path = self.adoptions_dir / f"{tag}.json"
+        adoption.save(path)
+        return path
+
+    def list_adoptions(self, scenario_id: str) -> list[Path]:
+        prefix = f"{_safe(scenario_id)}__"
+        return sorted(self.adoptions_dir.glob(f"{prefix}*.json"))
+
+    def load_adoption(self, path: str | Path):
+        from .adopt import Adoption
+        return Adoption.load(path)

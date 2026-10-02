@@ -26,3 +26,14 @@ __all__ = [
     "LedgerError", "money",
     "FeeAmendment", "replan", "combined_replay", "build_prefix",
 ]
+from .adopt import (
+    Adoption, AdoptionResult, WithdrawalResult,
+    confirm_partial, compare_partials, withdraw_adoption,
+    adoption_combined_replay, confirmed_orders,
+)
+
+__all__ += [
+    "Adoption", "AdoptionResult", "WithdrawalResult",
+    "confirm_partial", "compare_partials", "withdraw_adoption",
+    "adoption_combined_replay", "confirmed_orders",
+]

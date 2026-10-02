@@ -37,6 +37,41 @@
   费率升至 2% 的全过程：工资/房租改走贵但及时的直达路径，可选采购
   推迟到尾款日，每日余额与重开后资金守恒全部核对通过。
 
+## 第三轮：部分采纳、确认占款与撤回
+
+资金计划允许只采纳一个候选方案中的**部分**支付安排，再为尚未确认的付款
+重新规划：
+
+- **确认占款**：已确认安排按「本金 + 手续费」实际占用账户资金与调拨能力
+  （作为 fixed 订单参与重放），其他方案不能同时花费这部分余额；
+  只确认调拨链后半段等不可行范围会被明确报出，而不是静默出错。
+- **影响可见**：对每个尚未确认的候选安排，列出采纳它会使哪些剩余付款
+  推迟、费用增减多少、让哪些付款失去可行安排（`AdoptionResult.impacts`）。
+- **撤回只影响未执行部分**：已发出的调拨保持在途——本金早已离户不再重扣、
+  到账日照常入账、已发生手续费不退回；未发出的确认安排释放占款，
+  剩余付款以 cutoff 日终真实状态为起点重排，在途资金处理方式逐笔说明。
+- **两个部分采纳方案对照**：`compare_partials` 并排输出各方案的确认范围、
+  保留的原始期限约束与剩余缺口，互不影响。
+- **重开续作**：采纳记录 `Adoption` 独立持久化（`data/adoptions/`），
+  重新打开后可继续采纳或撤回；确认集合按单号去重，不重复占款，
+  已发生费用保留在账上。用收入迟到、共享资金争用和一笔付款部分到账
+  的全过程核对逐日账目（`examples/run_adoption_demo.py`）。
+
+新增模块/命令：
+
+- `cashflow/adopt.py`：`confirm_partial`、`compare_partials`、
+  `withdraw_adoption`、`adoption_combined_replay`、`Adoption`。
+- `python -m cashflow adopt <场景> <计划> --confirm 单号 [--prior 采纳记录]`
+- `python -m cashflow adopt-compare <场景> <计划> --scope 标签:单号1,单号2 ...`
+- `python -m cashflow withdraw <场景> <采纳记录> <计划> <执行记录> <cutoff>`
+- `replan()` 现在自动把 cutoff 之后的实际收入记录（迟到/部分到账）
+  纳入修订，显式 `--inflow` 参数优先。
+# 资金流动推演系统
+
+根据虚构账户、已知收支和账户间调拨限制，按日推演未来各时段的资金缺口，
+产出可按时间重放的调拨计划；场景、计划、实际执行记录分别持久化。
+后续轮次在此基础上加入融资选择。
+
 ## 核心约束
 
 - **支付窗口与原始期限分离**：支出可提供 `window_start/window_end`，`date`
@@ -69,8 +104,9 @@
 - `cashflow/plan.py`：计划 `Plan` 与实际执行 `Execution`，分文件保存
 - `cashflow/repo.py`：`data/scenarios|plans|executions/` 三类数据分目录
 - `cashflow/report.py`：事件清单、每日各账户资金账、缺口位置、对账报表
+- `cashflow/adopt.py`：部分采纳、确认占款、影响分析、撤回与重开续作
 - `examples/run_demo.py`：三账户小例子，枚举与贪心对拍
-- `tests/`：11 个单元测试
+- `tests/`：32 个单元测试
 
 ## 运行
 
@@ -81,6 +117,7 @@
 .venv/bin/python -m cashflow solve data/scenarios/demo01.json --brute
 .venv/bin/python -m cashflow replay data/scenarios/demo01.json <plan.json>
 .venv/bin/python -m examples.run_revision_demo       # 第二轮：延误后修订重规划
+.venv/bin/python -m examples.run_adoption_demo       # 第三轮：部分采纳/撤回/重开续作
 ```
 
 ## 小例子结论（2026-10-01 至 10-08）

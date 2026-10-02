@@ -326,6 +326,15 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
     amendments = amendments or []
     inflow_updates = inflow_updates or {}
     outflow_shifts = outflow_shifts or {}
+    # 未来收入的实际到账记录（迟到/部分到账）自动纳入修订，显式参数优先
+    auto = {}
+    for f in scenario.flows:
+        if f.kind == FlowKind.INFLOW and f.date > cutoff_date:
+            act = _actual_map(execution).get(f.flow_id)
+            if act is not None and f.flow_id not in inflow_updates:
+                auto[f.flow_id] = (act.actual_date, act.amount)
+    if auto:
+        inflow_updates = {**auto, **inflow_updates}
     chain_quote = chain_quote or {}
 
     prefix = build_prefix(scenario, execution, cutoff_date)

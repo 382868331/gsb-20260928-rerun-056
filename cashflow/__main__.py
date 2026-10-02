@@ -16,9 +16,12 @@ from .plan import Plan
 from .plan import Execution
 from .report import daily_ledger, event_log, gap_report, plan_summary, reconciliation
 from .report import payment_strategy_report, revision_summary
+from .report import adoption_summary, adoption_compare_report, withdrawal_summary
 from .repo import Repository
 from .scenario import Scenario
 from .replan import FeeAmendment, replan, combined_replay
+from .adopt import (Adoption, confirm_partial, compare_partials,
+                    withdraw_adoption, adoption_combined_replay)
 from decimal import Decimal
 
 
@@ -69,6 +72,33 @@ def main() -> None:
     p_rev.add_argument("--no-defer-p3", action="store_true",
                        help="不允许推迟可选支付")
     p_rev.add_argument("--data-dir", default="data")
+
+
+    p_adopt = sub.add_parser("adopt", help="部分采纳候选计划中的调拨安排")
+    p_adopt.add_argument("scenario")
+    p_adopt.add_argument("plan")
+    p_adopt.add_argument("--confirm", action="append", default=[],
+                         metavar="ORDER_ID", help="确认的调拨单号，可多次")
+    p_adopt.add_argument("--prior", default=None,
+                         help="重开的历史采纳记录 JSON（继续采纳）")
+    p_adopt.add_argument("--label", default="")
+    p_adopt.add_argument("--execution", default=None, help="实际执行记录 JSON")
+    p_adopt.add_argument("--data-dir", default="data")
+
+    p_cmp = sub.add_parser("adopt-compare", help="两个部分采纳方案的对照")
+    p_cmp.add_argument("scenario")
+    p_cmp.add_argument("plan")
+    p_cmp.add_argument("--scope", action="append", required=True,
+                       metavar="LABEL:ID1,ID2",
+                       help="一个部分采纳范围，可多次（至少两个）")
+
+    p_wd = sub.add_parser("withdraw", help="撤回部分采纳（只影响未执行部分）")
+    p_wd.add_argument("scenario")
+    p_wd.add_argument("adoption")
+    p_wd.add_argument("plan")
+    p_wd.add_argument("execution")
+    p_wd.add_argument("cutoff")
+    p_wd.add_argument("--data-dir", default="data")
 
     args = parser.parse_args()
 
@@ -134,6 +164,55 @@ def main() -> None:
         print(reconciliation(full, scenario))
         print(f"\n修订计划与执行记录分开保存：{path}")
 
+
+
+    elif args.cmd == "adopt":
+        scenario = _load_scenario(args.scenario)
+        plan = Plan.load(args.plan)
+        prior = Adoption.load(args.prior) if args.prior else None
+        result = confirm_partial(scenario, plan, args.confirm, prior=prior,
+                                 label=args.label)
+        repo = Repository(args.data_dir)
+        repo.save_adoption(result.adoption)
+        path = repo.save_plan(result.residual_plan)
+        print(adoption_summary(result))
+        execution = Execution.load(args.execution) if args.execution else None
+        full = adoption_combined_replay(scenario, result.adoption,
+                                        result.residual_plan, execution)
+        print()
+        print(daily_ledger(full))
+        print()
+        print(reconciliation(full, scenario))
+        print(f"\n采纳记录与剩余计划已保存：{path}")
+
+    elif args.cmd == "adopt-compare":
+        scenario = _load_scenario(args.scenario)
+        plan = Plan.load(args.plan)
+        scopes = []
+        for item in args.scope:
+            label, _, ids = item.partition(":")
+            scopes.append((label, [x for x in ids.split(",") if x]))
+        results = compare_partials(scenario, plan, scopes)
+        print(adoption_compare_report(results))
+        print()
+        for res in results:
+            print(adoption_summary(res))
+            print()
+
+    elif args.cmd == "withdraw":
+        scenario = _load_scenario(args.scenario)
+        adoption = Adoption.load(args.adoption)
+        plan = Plan.load(args.plan)
+        execution = Execution.load(args.execution)
+        result = withdraw_adoption(scenario, adoption, plan, execution,
+                                   args.cutoff)
+        repo = Repository(args.data_dir)
+        repo.save_adoption(result.adoption)
+        path = repo.save_plan(result.replan_result.plan)
+        print(withdrawal_summary(result))
+        print()
+        print(daily_ledger(result.replan_result.residual_replay))
+        print(f"\n撤回后的修订计划已保存：{path}")
 
 if __name__ == "__main__":
     main()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from .engine import ReplayResult
+from .models import money
 from .plan import Plan
 from .scenario import Scenario
 
@@ -138,4 +139,106 @@ def revision_summary(plan: Plan) -> str:
             f"{d['scheduled_date']} {d['flow_id']} P{d['priority']} "
             f"应付 {d['due']} 实付 {d['paid']} 缺口 {d['shortfall']}")
         lines.append(f"      理由：{d['reason']}")
+    return "\n".join(lines)
+
+
+def adoption_summary(result) -> str:
+    """部分采纳摘要：确认范围、占款、剩余付款重规划与候选影响。"""
+    from .adopt import confirmed_orders
+    adoption = result.adoption
+    orders = confirmed_orders(adoption)
+    principal = sum((o.principal for o in orders), Decimal("0"))
+    fees = sum((o.fee for o in orders), Decimal("0"))
+    lines = [
+        f"部分采纳（{adoption.label or adoption.adoption_id}，"
+        f"来源计划 {adoption.plan_created_at}）:",
+        f"  确认范围：{len(orders)} 笔调拨，占用本金 {money(principal)} "
+        f"+ 手续费 {money(fees)}（其他方案不能再花费这部分余额）",
+    ]
+    for o in orders:
+        lines.append(f"    {o.order_id}: {o.initiate_date} {o.source}->{o.target} "
+                     f"本金 {o.principal} 费 {o.fee}，{o.arrival_date} 到账")
+    if result.skipped:
+        lines.append(f"  已确认过、未重复占款：{', '.join(result.skipped)}")
+    if result.residual_plan is None:
+        lines.append(f"  确认范围不可行：{result.infeasible_reason}")
+        lines.append("  （如只确认了调拨链的后半段；请调整确认范围后重试）")
+        return "\n".join(lines)
+    plan = result.residual_plan
+    lines.append(f"  剩余付款重规划：{len(plan.orders)} 笔新调拨，"
+                 f"新增手续费 {plan.total_fee}")
+    for o in plan.orders:
+        lines.append(f"    {o.order_id}: {o.initiate_date} {o.source}->{o.target} "
+                     f"本金 {o.principal} 费 {o.fee}，{o.arrival_date} 到账")
+    if plan.remaining_gaps:
+        lines.append("  剩余缺口:")
+        for g in plan.remaining_gaps:
+            lines.append(f"    {g['date']} {g['flow_id']} P{g['priority']} "
+                         f"缺口 {g['shortfall']}")
+    else:
+        lines.append("  剩余缺口：无")
+    if result.impacts:
+        lines.append("  尚未确认安排的影响（若采纳）:")
+        for im in result.impacts:
+            if im.get("error"):
+                lines.append(f"    {im['order_id']} ({im['route']} "
+                             f"本金 {im['principal']}): {im['error']}")
+                continue
+            parts = []
+            if im["delayed_payments"]:
+                parts.append("使付款推迟 " + ", ".join(
+                    f"{d['flow_id']} {d['from']}->{d['to']}"
+                    for d in im["delayed_payments"]))
+            if Decimal(im["fee_delta"]) != 0:
+                parts.append(f"费用变化 {im['fee_delta']}")
+            if im["lost_feasible"]:
+                parts.append("失去可行安排 " + ", ".join(im["lost_feasible"]))
+            if not parts:
+                parts.append("不影响其余付款的期限、费用与可行性")
+            lines.append(f"    {im['order_id']} ({im['route']} "
+                         f"本金 {im['principal']}): " + "；".join(parts))
+    return "\n".join(lines)
+
+
+def adoption_compare_report(results) -> str:
+    """两个部分采纳方案的对照：保留原约束、确认范围、剩余缺口。"""
+    lines = ["部分采纳方案对照（原始期限约束均保留，互不影响）:"]
+    for res in results:
+        plan = res.residual_plan
+        originals = plan.schedule_basis.get("original_due_date", {})
+        kept = ", ".join(f"{k}:{v}" for k, v in sorted(originals.items())) or "按原计划期限"
+        gap_total = sum((Decimal(g["shortfall"]) for g in plan.remaining_gaps),
+                        Decimal("0"))
+        scope = ", ".join(e["order"]["order_id"] for e in res.adoption.confirmed)
+        lines.append(
+            f"  方案[{res.adoption.label}] 确认范围: {scope or '无'} | "
+            f"保留原约束: {kept} | 新增费用 {plan.total_fee} | "
+            f"剩余缺口合计 {money(gap_total)}")
+        for g in plan.remaining_gaps:
+            lines.append(f"    缺口 {g['date']} {g['flow_id']} "
+                         f"P{g['priority']} {g['shortfall']}")
+    return "\n".join(lines)
+
+
+def withdrawal_summary(result) -> str:
+    """撤回摘要：在途保持、释放占款、已发生费用。"""
+    lines = [
+        f"撤回部分采纳（{result.adoption.adoption_id}，状态 "
+        f"{result.adoption.status}）:",
+        f"  已发生手续费 {result.fees_incurred} 保留在账上，不退回",
+    ]
+    if result.kept_in_transit:
+        lines.append("  已发出、保持在途（撤回不影响）:")
+        for k in result.kept_in_transit:
+            lines.append(f"    {k['order_id']} ({k['route']} "
+                         f"本金 {k['principal']}): {k['handling']}")
+    if result.released:
+        lines.append("  尚未执行、释放占款:")
+        for r in result.released:
+            lines.append(f"    {r['order_id']} ({r['route']} "
+                         f"本金 {r['principal']}): {r['handling']}")
+    plan = result.replan_result.plan
+    lines.append(f"  撤回后剩余付款重规划：{len(plan.orders)} 笔新调拨，"
+                 f"新增手续费 {plan.total_fee}，缺口 "
+                 f"{len(plan.remaining_gaps)} 处")
     return "\n".join(lines)
