@@ -78,6 +78,11 @@ class Plan:
     partial_adoption_options: list[dict] = field(default_factory=list)
     withdrawn_order_ids: list[str] = field(default_factory=list)
     committed_fee: Decimal = Decimal("0")
+    # ---- 第四轮：退回资金与剩余支付重规划 ----
+    # 全部退回/拒付记录（含状态：已到可用 / 预计退回不可用 / 假设到账）
+    refund_records: list[dict] = field(default_factory=list)
+    # 预计退回但尚未到达的退回（不作为可用资金，仅登记）
+    expected_refunds: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -105,6 +110,8 @@ class Plan:
             "partial_adoption_options": self.partial_adoption_options,
             "withdrawn_order_ids": self.withdrawn_order_ids,
             "committed_fee": str(self.committed_fee),
+            "refund_records": self.refund_records,
+            "expected_refunds": self.expected_refunds,
         }
 
     @classmethod
@@ -130,6 +137,8 @@ class Plan:
             d.get("partial_adoption_options", []),
             d.get("withdrawn_order_ids", []),
             money(d.get("committed_fee", "0")),
+            d.get("refund_records", []),
+            d.get("expected_refunds", []),
         )
 
     def save(self, path: str | Path) -> Path:
@@ -197,6 +206,49 @@ class ActualInflow:
         )
 
 
+@dataclass(frozen=True)
+class RefundRecord:
+    """一笔退回/拒付的实际记录（第四轮）。
+
+    已发出的支付安排可能只退回一部分资金，原手续费未必退回。
+    - refund_id 唯一：重复通知或同一笔款的更正按同一 refund_id 覆盖，
+      不会产生第二份余额；
+    - actual_date 为 None 表示退回仍在路上（预计退回），不能当作可用资金；
+    - return_account 可与原付款账户不同（跨账户返回）；
+    - fee_refunded 为原手续费中实际退回的部分（通常为 0，即手续费不退）。
+    """
+
+    refund_id: str
+    original_flow_id: str          # 被退回的原支出 flow_id
+    payer_account: str             # 原付款账户
+    return_account: str            # 退回入账账户（可跨账户返回）
+    expected_date: str             # 预计退回日
+    amount: Decimal                # 退回本金（部分退回时小于原付款）
+    actual_date: str | None = None          # 实际到账日；None 表示尚未到达
+    fee_refunded: Decimal = Decimal("0")    # 原手续费退回部分
+    kind: str = "refund"           # refund（退回）/ chargeback（拒付）
+    note: str = ""
+
+    @property
+    def arrived(self) -> bool:
+        return self.actual_date is not None
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["amount"] = str(self.amount)
+        d["fee_refunded"] = str(self.fee_refunded)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RefundRecord":
+        return cls(
+            d["refund_id"], d["original_flow_id"], d["payer_account"],
+            d["return_account"], d["expected_date"], money(d["amount"]),
+            d.get("actual_date"), money(d.get("fee_refunded", "0")),
+            d.get("kind", "refund"), d.get("note", ""),
+        )
+
+
 @dataclass
 class Execution:
     """实际执行记录，与计划分开保存，供下一轮做计划 vs 实际差异分析。"""
@@ -209,6 +261,23 @@ class Execution:
     initiated_order_ids: list[str] = field(default_factory=list)
     # 收入实际到账记录：金额可少于计划（部分到账），未列入的往期收入视为未到账
     actual_inflows: list["ActualInflow"] = field(default_factory=list)
+    # 退回/拒付实际记录：按 refund_id 去重，重复通知/更正不增加第二份余额
+    refunds: list["RefundRecord"] = field(default_factory=list)
+
+    def record_refund(self, record: "RefundRecord") -> dict:
+        """登记一笔退回。同一 refund_id 重复通知被忽略，更正则覆盖原记录。"""
+        for i, existing in enumerate(self.refunds):
+            if existing.refund_id != record.refund_id:
+                continue
+            if existing == record:
+                return {"refund_id": record.refund_id, "action": "duplicate_ignored",
+                        "handling": "重复通知：同一 refund_id 已存在，不增加第二份余额"}
+            self.refunds[i] = record
+            return {"refund_id": record.refund_id, "action": "corrected",
+                    "handling": "同一笔退回的更正：按 refund_id 覆盖原记录，余额只算一次"}
+        self.refunds.append(record)
+        return {"refund_id": record.refund_id, "action": "recorded",
+                "handling": "新退回记录"}
 
     def to_dict(self) -> dict:
         return {
@@ -218,6 +287,7 @@ class Execution:
             "actual_transfers": [t.to_dict() for t in self.actual_transfers],
             "initiated_order_ids": self.initiated_order_ids,
             "actual_inflows": [f.to_dict() for f in self.actual_inflows],
+            "refunds": [r.to_dict() for r in self.refunds],
         }
 
     @classmethod
@@ -227,6 +297,7 @@ class Execution:
             [ActualTransfer.from_dict(t) for t in d.get("actual_transfers", [])],
             d.get("initiated_order_ids", []),
             [ActualInflow.from_dict(f) for f in d.get("actual_inflows", [])],
+            [RefundRecord.from_dict(r) for r in d.get("refunds", [])],
         )
 
     def save(self, path: str | Path) -> Path:

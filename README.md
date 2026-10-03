@@ -60,6 +60,43 @@
 `compare_partial_adoptions()`、`withdraw_arrangements()`、
 `replay_with_adoptions()`；新增测试见 `tests/test_partial_adoption.py`。
 
+## 第四轮：退回资金与剩余支付重规划
+
+已发出的支付安排可能只退回一部分资金，原手续费也未必退回。系统把退回/拒付
+作为独立实际记录建模，与剩余支付重规划打通：
+
+- **退回记录按 `refund_id` 去重**：`RefundRecord` 记在执行记录
+  `Execution.refunds` 中；重复通知被忽略，同一笔款的更正覆盖原记录，
+  重放时绝不会增加第二份余额。退回可分多次到达（不同 `refund_id`）。
+- **四种资金状态逐笔区分**（`refund_disposition()`）：原付款额、
+  在途金额（任何一方不可用）、收款方已经收到的净留存、已退回且可再次
+  使用的余额；`actual_date` 为空的**预计退回不作为可用资金**，
+  只登记在 `Plan.expected_refunds`。
+- **退回是新的入账事件，不是回滚**：原安排已经发生的调拨保持不动，
+  已扣手续费照常保留（`fee_refunded` 通常为 0）；退回可入**不同账户**
+  （跨账户返回 `return_account`），可迟到（`actual_date` 晚于预计日）。
+- **退回到达后的剩余支付重规划**：`compare_refund_strategies()` 对照
+  「继续等待退回」（预计退回按预计日显式假设入账）与「替代账户安排」
+  （不等退回，立即用其他账户调拨）两种选择的剩余缺口与费用；
+  重规划可用退回的一部分覆盖尚未确认的付款，撤回候选仍只释放未执行的占用。
+- **重开继续对账**：每次重规划把采用的实际到账依据写入
+  `schedule_basis["refund_basis"]`；`combined_replay()` 把退回入账、
+  在途、已确认未发起订单与新增补差额订单放入同一本逐日账，
+  账户余额、在途金额与原支付的最终去向仍能对上。
+
+新增模块/接口：
+
+- `cashflow/refund.py`：`record_refunds()`、`refund_disposition()`、
+  `compare_refund_strategies()`。
+- `Plan` 扩展 `refund_records/expected_refunds`；`Execution` 扩展
+  `refunds` 与 `record_refund()`；`replan()` 新增
+  `refund_assumptions` 参数（仅对照假设时预计退回才入账）。
+- `python -m cashflow replan ... --refund RID,FLOW,RET_ACCT,预计,实际,金额[,费]
+  [--compare-refund]`
+- `examples/run_refund_demo.py`：部分退回 + 退回迟到 + 跨账户返回 +
+  手续费不退 + 重复通知/更正的全过程演示；新增测试见
+  `tests/test_refund.py`。
+
 ## 核心约束
 
 - **支付窗口与原始期限分离**：支出可提供 `window_start/window_end`，`date`
@@ -90,6 +127,7 @@
 - `cashflow/engine.py`：基线推演、按订单重放、贪心求解器（反向 DFS 选最便宜调拨链）
 - `cashflow/solver_brute.py`：小规模残差 DFS 枚举求解器，用于小例子对拍
 - `cashflow/plan.py`：计划 `Plan` 与实际执行 `Execution`，分文件保存
+- `cashflow/refund.py`：退回/拒付记录、退回去向核对、等待 vs 替代账户对照
 - `cashflow/repo.py`：`data/scenarios|plans|executions/` 三类数据分目录
 - `cashflow/report.py`：事件清单、每日各账户资金账、缺口位置、对账报表
 - `examples/run_demo.py`：三账户小例子，枚举与贪心对拍
@@ -104,6 +142,7 @@
 .venv/bin/python -m cashflow solve data/scenarios/demo01.json --brute
 .venv/bin/python -m cashflow replay data/scenarios/demo01.json <plan.json>
 .venv/bin/python -m examples.run_revision_demo       # 第二轮：延误后修订重规划
+.venv/bin/python -m examples.run_refund_demo         # 第四轮：退回资金与剩余支付重规划
 ```
 
 ## 小例子结论（2026-10-01 至 10-08）

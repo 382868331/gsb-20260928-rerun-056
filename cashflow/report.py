@@ -160,3 +160,48 @@ def revision_summary(plan: Plan) -> str:
             f"应付 {d['due']} 实付 {d['paid']} 缺口 {d['shortfall']}")
         lines.append(f"      理由：{d['reason']}")
     return "\n".join(lines)
+
+
+def refund_report(plan: Plan) -> str:
+    """退回资金核对：区分原付款、已退回可用、预计退回（不可用）与手续费。"""
+    if not plan.refund_records:
+        return "退回资金核对：无退回/拒付记录"
+    lines = ["退回资金核对（预计退回不作为可用资金）:"]
+    for r in plan.refund_records:
+        kind = "拒付" if r["kind"] == "chargeback" else "退回"
+        if r["status"] == "expected_not_usable":
+            lines.append(
+                f"    {r['refund_id']} [{kind}] 原付款 {r['original_flow_id']} "
+                f"预计 {r['expected_date']} 退回 {r['amount']} 至 "
+                f"{r['return_account']}（未到达，不可用）")
+        else:
+            tag = "假设到账" if r["status"] == "assumed" else "已到账可用"
+            fee = (f"，手续费退回 {r['fee_refunded']}"
+                   if r["fee_refunded"] != "0.00" else "，手续费不退")
+            lines.append(
+                f"    {r['refund_id']} [{kind}] 原付款 {r['original_flow_id']} "
+                f"{r['actual_date']} 退回 {r['amount']} 至 "
+                f"{r['return_account']}（{tag}{fee}）")
+    basis = plan.schedule_basis.get("refund_basis")
+    if basis:
+        lines.append("  本次重规划采用的实际到账依据:")
+        for b in basis:
+            lines.append(f"    {b['refund_id']} {b['date']} "
+                         f"+{b['amount']} -> {b['return_account']} [{b['status']}]")
+    return "\n".join(lines)
+
+
+def refund_strategy_report(options: list[dict]) -> str:
+    """继续等待退回 vs 替代账户安排 的对照报表。"""
+    lines = ["剩余支付重规划对照（等待退回 vs 替代账户安排）:"]
+    for o in options:
+        assumed = ", ".join(f"{a['refund_id']}@{a['assumed_date']}"
+                            for a in o["assumed_refunds"]) or "无"
+        delayed = ", ".join(f"{k}->{v}" for k, v in
+                            o["delayed_payments"].items()) or "无"
+        lines.append(
+            f"  {o['name']}: 剩余缺口 {o['remaining_gap']} "
+            f"总费用 {o['total_fee']} 费用溢价 {o['fee_premium']} "
+            f"新增调拨 {len(o['new_orders'])} 笔 推迟 {delayed} "
+            f"假设退回 {assumed}")
+    return "\n".join(lines)

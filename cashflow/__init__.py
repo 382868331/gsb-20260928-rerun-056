@@ -2,7 +2,7 @@
 
 from .models import Account, CashFlow, FlowKind, Priority, TransferRule, money
 from .scenario import Scenario
-from .plan import Plan, Execution, TransferOrder
+from .plan import Plan, Execution, TransferOrder, RefundRecord
 from .engine import simulate_baseline, solve, SolveResult
 from .solver_brute import brute_force_solve
 from .ledger import Ledger, LedgerError
@@ -10,6 +10,9 @@ from .replan import FeeAmendment, replan, combined_replay, build_prefix
 from .adoption import (
     adopt_partial_arrangements, compare_partial_adoptions,
     withdraw_arrangements, replay_with_adoptions,
+)
+from .refund import (
+    record_refunds, refund_disposition, compare_refund_strategies,
 )
 
 __all__ = [
@@ -22,6 +25,7 @@ __all__ = [
     "Plan",
     "Execution",
     "TransferOrder",
+    "RefundRecord",
     "simulate_baseline",
     "solve",
     "SolveResult",
@@ -31,4 +35,5 @@ __all__ = [
     "FeeAmendment", "replan", "combined_replay", "build_prefix",
     "adopt_partial_arrangements", "compare_partial_adoptions",
     "withdraw_arrangements", "replay_with_adoptions",
+    "record_refunds", "refund_disposition", "compare_refund_strategies",
 ]

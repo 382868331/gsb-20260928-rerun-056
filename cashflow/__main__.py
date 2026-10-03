@@ -16,9 +16,12 @@ from .plan import Plan
 from .plan import Execution
 from .report import daily_ledger, event_log, gap_report, plan_summary, reconciliation
 from .report import payment_strategy_report, revision_summary
+from .report import refund_report, refund_strategy_report
 from .repo import Repository
 from .scenario import Scenario
 from .replan import FeeAmendment, replan, combined_replay
+from .refund import compare_refund_strategies
+from .plan import RefundRecord
 from decimal import Decimal
 
 
@@ -68,6 +71,11 @@ def main() -> None:
                        help="修订未来收入到账日/金额，可多次")
     p_rev.add_argument("--no-defer-p3", action="store_true",
                        help="不允许推迟可选支付")
+    p_rev.add_argument("--refund", action="append", default=[],
+                       metavar="RID,FLOW,RET_ACCT,EXPECTED,ACTUAL,AMOUNT[,FEE]",
+                       help="退回/拒付记录；ACTUAL 留空表示预计退回（不可用），可多次")
+    p_rev.add_argument("--compare-refund", action="store_true",
+                       help="对照 等待退回 vs 替代账户安排")
     p_rev.add_argument("--data-dir", default="data")
 
     args = parser.parse_args()
@@ -119,12 +127,29 @@ def main() -> None:
         for item in args.inflow:
             fid, day, amount = item.split(",")
             inflow_updates[fid] = (day, Decimal(amount))
+        for item in args.refund:
+            parts = item.split(",")
+            rid, fid, ret, expected, actual, amount = parts[:6]
+            fee = parts[6] if len(parts) > 6 else "0"
+            payer = next((f.account_id for f in scenario.flows
+                          if f.flow_id == fid), ret)
+            execution.record_refund(RefundRecord(
+                rid, fid, payer, ret, expected, Decimal(amount),
+                actual or None, Decimal(fee)))
         rr = replan(scenario, original, execution, args.cutoff,
                     amendments=amendments, inflow_updates=inflow_updates,
                     allow_defer_p3=not args.no_defer_p3)
         repo = Repository(args.data_dir)
         path = repo.save_plan(rr.plan)
+        repo.save_execution(execution)
         print(revision_summary(rr.plan))
+        print()
+        print(refund_report(rr.plan))
+        if args.compare_refund:
+            print()
+            print(refund_strategy_report(compare_refund_strategies(
+                scenario, original, execution, args.cutoff,
+                amendments=amendments, inflow_updates=inflow_updates)))
         print()
         print(payment_strategy_report(rr.plan))
         print()

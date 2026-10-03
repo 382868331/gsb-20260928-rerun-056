@@ -78,6 +78,44 @@ def _actual_map(execution: Execution) -> dict[str, ActualInflow]:
     return {f.flow_id: f for f in execution.actual_inflows}
 
 
+def _refund_flows(execution: Execution, lo: str, hi: str,
+                  assumptions: dict[str, str] | None = None,
+                  ) -> tuple[list, list[dict]]:
+    """把 [lo, hi] 区间内实际到达（或显式假设到达）的退回转成收入流水。
+
+    预计退回（actual_date 为 None）默认不产生流水——不能提前当作可用资金；
+    仅当 refund_assumptions 显式给出假设到账日时才入账（用于对照方案）。
+    返回 (流水列表, 入账依据列表)。
+    """
+    from .models import CashFlow
+    assumptions = assumptions or {}
+    flows, basis = [], []
+    for r in getattr(execution, "refunds", []):
+        assumed = False
+        day = r.actual_date
+        if day is None:
+            day = assumptions.get(r.refund_id)
+            assumed = day is not None
+        if day is None or not (lo <= day <= hi):
+            continue
+        label = "拒付" if r.kind == "chargeback" else "退回"
+        flows.append(CashFlow(
+            f"REFUND-{r.refund_id}", r.return_account, day,
+            FlowKind.INFLOW, r.amount,
+            memo=f"{label} {r.original_flow_id}（原付款账户 {r.payer_account}）"))
+        if r.fee_refunded > 0:
+            flows.append(CashFlow(
+                f"REFUNDFEE-{r.refund_id}", r.return_account, day,
+                FlowKind.INFLOW, r.fee_refunded,
+                memo=f"{label} {r.original_flow_id} 的手续费退回"))
+        basis.append({"refund_id": r.refund_id, "original_flow_id": r.original_flow_id,
+                      "return_account": r.return_account, "date": day,
+                      "amount": str(r.amount),
+                      "fee_refunded": str(r.fee_refunded),
+                      "status": "assumed" if assumed else "arrived"})
+    return flows, basis
+
+
 def build_prefix(scenario: Scenario, execution: Execution,
                  cutoff_date: str) -> ReplayResult:
     """按实际执行重放 期初..cutoff，得到真实余额、在途、已付与已到收入。"""
@@ -102,6 +140,9 @@ def build_prefix(scenario: Scenario, execution: Execution,
                 f.priority, f.memo, f.window_start, f.window_end))
         else:
             prefix_flows.append(f)
+    # cutoff 前已实际到达的退回/拒付：按实际到账日入退回账户（可跨账户）
+    refund_flows, _ = _refund_flows(execution, scenario.start_date, cutoff_date)
+    prefix_flows.extend(refund_flows)
     prefix_sc = _Sc(
         scenario.scenario_id + "@prefix", scenario.start_date, cutoff_date,
         list(scenario.accounts), prefix_flows,
@@ -128,7 +169,9 @@ def _residual_scenario(scenario: Scenario, prefix: ReplayResult,
                        execution: Execution, cutoff_date: str,
                        amendments: list[FeeAmendment],
                        inflow_updates: dict[str, tuple[str, Decimal]],
-                       outflow_shifts: dict[str, str]) -> tuple[Scenario, dict]:
+                       outflow_shifts: dict[str, str],
+                       refund_assumptions: dict[str, str] | None = None
+                       ) -> tuple[Scenario, dict]:
     """以 cutoff 日终真实状态为起点，构造残差推演场景。
 
     返回 (残差场景, 辅助信息)；辅助信息含往期部分支付额、原始期限等。
@@ -182,6 +225,11 @@ def _residual_scenario(scenario: Scenario, prefix: ReplayResult,
                     f.flow_id, f.account_id, new_date, f.kind, money(new_amount),
                     f.priority, f.memo, f.window_start, f.window_end))
 
+    # cutoff 后实际到达的退回直接入账；预计退回仅在显式假设下入账
+    refund_flows, refund_basis = _refund_flows(
+        execution, first_day, scenario.end_date, refund_assumptions)
+    residual_flows.extend(refund_flows)
+
     residual = Scenario(
         scenario.scenario_id + "@residual", first_day, scenario.end_date,
         [Account(a.account_id, a.name, led.available(a.account_id))
@@ -189,7 +237,8 @@ def _residual_scenario(scenario: Scenario, prefix: ReplayResult,
         residual_flows, list(scenario.transfer_rules), scenario.description)
     _amend_rules(residual, amendments, first_day)
     residual.validate()
-    return residual, {"carry": carry_info, "paid": paid_map, "due": due_map}
+    return residual, {"carry": carry_info, "paid": paid_map, "due": due_map,
+                      "refund_basis": refund_basis}
 
 
 def _fixed_transit_orders(prefix: ReplayResult) -> list[TransferOrder]:
@@ -330,18 +379,22 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
            confirmed_arrangements: list[dict] | None = None,
            partial_adoption_options: list[dict] | None = None,
            withdrawn_order_ids: list[str] | None = None,
-           committed_fee: Decimal | None = None) -> ReplanResult:
+           committed_fee: Decimal | None = None,
+           refund_assumptions: dict[str, str] | None = None) -> ReplanResult:
     """根据实际执行与参数变动，生成可执行的剩余（修订）计划。"""
     amendments = amendments or []
     inflow_updates = inflow_updates or {}
     outflow_shifts = outflow_shifts or {}
     chain_quote = chain_quote or {}
-    withdrawn_order_ids = list(withdrawn_order_ids or [])
+    withdrawn_order_ids = list(
+        withdrawn_order_ids if withdrawn_order_ids is not None
+        else original_plan.withdrawn_order_ids)
+    refund_assumptions = dict(refund_assumptions or {})
 
     prefix = build_prefix(scenario, execution, cutoff_date)
     residual, aux = _residual_scenario(
         scenario, prefix, execution, cutoff_date, amendments,
-        inflow_updates, outflow_shifts)
+        inflow_updates, outflow_shifts, refund_assumptions)
     fixed = _fixed_transit_orders(prefix)
     executed_ids = set(execution.initiated_order_ids) | {
         t.order_id for t in execution.actual_transfers
@@ -395,7 +448,37 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
         {"flow_id": f.flow_id, "account_id": f.account_id,
          "expected_date": f.date, "amount": str(f.amount), "memo": f.memo}
         for f in residual_scenario.flows if f.kind == FlowKind.INFLOW
+        and not f.flow_id.startswith(("REFUND-", "REFUNDFEE-"))
     ]
+    # 退回记录与入账依据：重开后继续部分采纳时仍能对上原支付的最终去向
+    _, prefix_refund_basis = _refund_flows(
+        execution, scenario.start_date, cutoff_date)
+    refund_basis = prefix_refund_basis + aux["refund_basis"]
+    refund_records = []
+    expected_refunds = []
+    basis_by_id = {b["refund_id"]: b for b in refund_basis}
+    for r in getattr(execution, "refunds", []):
+        b = basis_by_id.get(r.refund_id)
+        entry = {
+            "refund_id": r.refund_id, "kind": r.kind,
+            "original_flow_id": r.original_flow_id,
+            "payer_account": r.payer_account,
+            "return_account": r.return_account,
+            "expected_date": r.expected_date,
+            "actual_date": r.actual_date,
+            "amount": str(r.amount), "fee_refunded": str(r.fee_refunded),
+            "status": (b["status"] if b else
+                       ("arrived" if r.arrived else "expected_not_usable")),
+            "usable_as_funds": b is not None,
+        }
+        refund_records.append(entry)
+        if not r.arrived:
+            expected_refunds.append(entry)
+    schedule_basis = {
+        **first.plan.schedule_basis,
+        "refund_basis": refund_basis,
+        "refund_assumptions": refund_assumptions,
+    }
     revised = Plan(
         scenario_id=scenario.scenario_id,
         created_at=datetime.now().isoformat(timespec="seconds"),
@@ -422,7 +505,7 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
         selected_strategy=first.plan.selected_strategy,
         payment_strategy_options=first.plan.payment_strategy_options,
         feasibility_status=first.plan.feasibility_status,
-        schedule_basis=first.plan.schedule_basis,
+        schedule_basis=schedule_basis,
         locked_orders=sorted(locked_orders,
                              key=lambda o: (o.initiate_date, o.order_id)),
         confirmed_arrangements=confirmed_arrangements or
@@ -431,12 +514,15 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
         original_plan.partial_adoption_options,
         withdrawn_order_ids=withdrawn_order_ids,
         committed_fee=committed_fee,
+        refund_records=refund_records,
+        expected_refunds=expected_refunds,
     )
     return ReplanResult(plan=revised, residual_replay=final, prefix_replay=prefix)
 
 
 def combined_replay(scenario: Scenario, execution: Execution, revised: Plan,
-                    inflow_updates: dict[str, tuple[str, Decimal]] | None = None
+                    inflow_updates: dict[str, tuple[str, Decimal]] | None = None,
+                    refund_assumptions: dict[str, str] | None = None
                     ) -> ReplayResult:
     """重开后从期初一路对清：实际执行前缀 + 修订计划，单本账资金守恒。
 
@@ -482,6 +568,10 @@ def combined_replay(scenario: Scenario, execution: Execution, revised: Plan,
             flows.append(CashFlow(f.flow_id, f.account_id, nd, f.kind, f.amount,
                                   f.priority, f.memo, f.window_start,
                                   f.window_end))
+    # 实际到达的退回按实际到账日入账；显式假设的预计退回仅在对照时入账
+    refund_flows, _ = _refund_flows(execution, scenario.start_date,
+                                    scenario.end_date, refund_assumptions)
+    flows.extend(refund_flows)
     full = Scenario(
         scenario.scenario_id + "@combined", scenario.start_date,
         scenario.end_date, list(scenario.accounts), flows,
