@@ -42,7 +42,8 @@ class ReplayResult:
 def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
            legs: list[TransferLeg] | None = None,
            snapshot_daily: bool = False,
-            preloaded_ids: set[str] | None = None) -> ReplayResult:
+            preloaded_ids: set[str] | None = None,
+            refunds: list | None = None) -> ReplayResult:
     """按日期重放。orders 为计划时与 legs 二选一；legs 可用于执行记录。"""
     scenario.validate()
     if legs is None:
@@ -57,6 +58,9 @@ def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
     for f in scenario.flows:
         (inflows if f.kind == FlowKind.INFLOW else outflows).setdefault(
             f.date, []).append(f)
+    refunds_by_day: dict[str, list] = {}
+    for r in refunds or []:
+        refunds_by_day.setdefault(r.arrival_date, []).append(r)
     initiations: dict[str, list[TransferLeg]] = {}
     arrivals: dict[str, list[TransferLeg]] = {}
     for leg in legs:
@@ -70,6 +74,8 @@ def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
     for day in daterange(scenario.start_date, scenario.end_date):
         for f in sorted(inflows.get(day, []), key=lambda x: x.flow_id):
             ledger.post_inflow(day, f.account_id, f.amount, f.flow_id)
+        for r in sorted(refunds_by_day.get(day, []), key=lambda x: x.refund_id):
+            ledger.post_refund(day, r)
         for leg in sorted(initiations.get(day, []), key=lambda x: x.order_id):
             ledger.initiate(day, leg)   # 余额不足直接抛错
         for leg in sorted(arrivals.get(day, []), key=lambda x: x.order_id):

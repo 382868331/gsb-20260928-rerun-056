@@ -11,6 +11,10 @@ from .adoption import (
     adopt_partial_arrangements, compare_partial_adoptions,
     withdraw_arrangements, replay_with_adoptions,
 )
+from .refunds import (
+    allocate_arrived_refund, compare_refund_usage, normalize_refunds,
+    refund_view, split_refunds,
+)
 
 __all__ = [
     "Account",
@@ -31,4 +35,6 @@ __all__ = [
     "FeeAmendment", "replan", "combined_replay", "build_prefix",
     "adopt_partial_arrangements", "compare_partial_adoptions",
     "withdraw_arrangements", "replay_with_adoptions",
+    "allocate_arrived_refund", "compare_refund_usage", "normalize_refunds",
+    "refund_view", "split_refunds",
 ]

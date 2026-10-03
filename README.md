@@ -60,6 +60,37 @@
 `compare_partial_adoptions()`、`withdraw_arrangements()`、
 `replay_with_adoptions()`；新增测试见 `tests/test_partial_adoption.py`。
 
+## 第四轮：退回与拒付后的剩余支付重规划
+
+已发出的支付安排可能只退回一部分资金，原手续费也未必退回。系统把退回/拒付
+作为**实际记录**（`RefundRecord`，挂在 `Execution.refunds`）参与重放与重规划：
+
+- **四类金额分得清**：原付款（已扣本金+手续费）、在途金额（仍在途中、
+  双方不可用）、收款方已收到的部分、退回后再次可用的余额，逐日在账簿与
+  报表中分开列示；`refund_view()` 按原付款汇总已退/预计/入账账户。
+- **预计退回不是可用资金**：cutoff 之后才能到账的退回只列入
+  `Plan.expected_refunds`（`usable=False`），不参与残差求解；到账后进入
+  `Plan.refund_basis`，成为重规划的实际到账依据。
+- **退回到达后可只使用一部分**：`allocate_arrived_refund()` 把已到账退回的
+  部分金额分配给尚未确认的付款（`Plan.refund_allocations`），累计分配
+  不得超过实际到账；预计退回提前使用直接报错。
+  `compare_refund_usage()` 对照「继续等待退回（缺口付款顺延）」与
+  「替代账户安排」的剩余缺口与费用。
+- **在途拒付只冲回未到达部分**：原安排已发生的调拨不回滚；在途调拨被
+  部分拒付时，退回部分从在途冲回（不再发往收款方），剩余本金仍按原到账日
+  入账，已扣手续费保留（`fee_refunded` 默认 0）。
+- **分次到账、重复通知与更正**：同一 `refund_id` 的重复通知忽略、更正以
+  最新记录为准（`normalize_refunds()`），不会形成第二份余额；不同
+  `refund_id` 的分次退回各自入账。
+- **按日期组合核对**：部分到账后再退回、退回迟到、跨账户返回
+  （`credit_account` 可与原付款账户不同）、费用不退等组合逐日重放；
+  `combined_replay` 重开后余额、在途与原支付最终去向仍满足
+  资金守恒（外部退回计入恒等式右侧，在途冲回与退手续费只是账内搬家）。
+
+新增模块 `cashflow/refunds.py`；`Plan` 扩展 `expected_refunds/refund_basis/
+refund_allocations`，`Execution` 扩展 `refunds`；示例见
+`examples/run_refund_demo.py`，测试见 `tests/test_refunds.py`。
+
 ## 核心约束
 
 - **支付窗口与原始期限分离**：支出可提供 `window_start/window_end`，`date`
@@ -104,6 +135,7 @@
 .venv/bin/python -m cashflow solve data/scenarios/demo01.json --brute
 .venv/bin/python -m cashflow replay data/scenarios/demo01.json <plan.json>
 .venv/bin/python -m examples.run_revision_demo       # 第二轮：延误后修订重规划
+.venv/bin/python -m examples.run_refund_demo         # 第四轮：退回与拒付重规划
 ```
 
 ## 小例子结论（2026-10-01 至 10-08）

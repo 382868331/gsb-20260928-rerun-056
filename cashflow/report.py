@@ -15,6 +15,12 @@ def event_log(result: ReplayResult) -> str:
         if e["event"] == "inflow":
             lines.append(f"  {e['date']} 收入到账  {e['flow_id']:<8} "
                          f"账户 {e['account']:<6} +{e['amount']}")
+        elif e["event"] == "refund":
+            extra = "" if e["fee_refunded"] == "0.00" else f"（退手续费 {e['fee_refunded']}）"
+            origin = "调拨" if e["target"] == "order" else "支出"
+            lines.append(f"  {e['date']} 退回到账  {e['refund_id']:<8} "
+                         f"原{origin} {e['ref_id']:<6} "
+                         f"入账 {e['account']:<6} +{e['amount']}{extra}")
         elif e["event"] == "transfer_initiate":
             lines.append(f"  {e['date']} 调拨发起  {e['order_id']:<6} "
                          f"{e['source']}->{e['target']} 本金 {e['principal']} "
@@ -70,12 +76,16 @@ def reconciliation(result: ReplayResult, scenario: Scenario) -> str:
     opening = sum((a.opening_balance for a in scenario.accounts), Decimal("0"))
     balance = sum(led.balances.values(), Decimal("0"))
     transit = sum((leg.principal for leg in led.in_transit.values()), Decimal("0"))
+    external_refunds = led.total_refunds - led.refund_from_transit
     lines = [
         "各账户资金账核对:",
         f"  期初合计 {opening} + 收入 {led.total_inflows} - 已付支出 {led.total_paid} "
-        f"= {opening + led.total_inflows - led.total_paid}",
+        f"+ 外部退回 {external_refunds} "
+        f"= {opening + led.total_inflows + external_refunds - led.total_paid}",
         f"  期末余额 {balance} + 在途 {transit} + 手续费 {led.total_fees} "
         f"= {balance + transit + led.total_fees}",
+        f"  退回合计 {led.total_refunds}（在途冲回 {led.refund_from_transit}，"
+        f"退手续费 {led.total_fee_refunds}）",
     ]
     for a in scenario.accounts:
         lines.append(f"  账户 {a.account_id}({a.name}): 期初 {a.opening_balance} "

@@ -24,6 +24,7 @@ from .ledger import Ledger, TransferLeg
 from .models import FlowKind, Priority, money
 from .models import TransferRule
 from .plan import ActualInflow, Execution, Plan, TransferOrder
+from .refunds import normalize_refunds, split_refunds
 from .scenario import Scenario
 
 
@@ -121,7 +122,9 @@ def build_prefix(scenario: Scenario, execution: Execution,
             t.order_id, t.source, t.target,
             t.actual_initiate_date, t.actual_arrival_date,
             money(t.actual_principal), money(t.actual_fee)))
-    return replay(prefix_sc, legs=legs, snapshot_daily=True)
+    refunds, _ = normalize_refunds(execution.refunds)
+    arrived = [r for r in refunds if r.arrival_date <= cutoff_date]
+    return replay(prefix_sc, legs=legs, snapshot_daily=True, refunds=arrived)
 
 
 def _residual_scenario(scenario: Scenario, prefix: ReplayResult,
@@ -330,7 +333,8 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
            confirmed_arrangements: list[dict] | None = None,
            partial_adoption_options: list[dict] | None = None,
            withdrawn_order_ids: list[str] | None = None,
-           committed_fee: Decimal | None = None) -> ReplanResult:
+           committed_fee: Decimal | None = None,
+           refund_allocations: list[dict] | None = None) -> ReplanResult:
     """根据实际执行与参数变动，生成可执行的剩余（修订）计划。"""
     amendments = amendments or []
     inflow_updates = inflow_updates or {}
@@ -339,6 +343,8 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
     withdrawn_order_ids = list(withdrawn_order_ids or [])
 
     prefix = build_prefix(scenario, execution, cutoff_date)
+    all_refunds, _ = normalize_refunds(execution.refunds)
+    arrived_refunds, expected_refunds = split_refunds(all_refunds, cutoff_date)
     residual, aux = _residual_scenario(
         scenario, prefix, execution, cutoff_date, amendments,
         inflow_updates, outflow_shifts)
@@ -431,6 +437,18 @@ def replan(scenario: Scenario, original_plan: Plan, execution: Execution,
         original_plan.partial_adoption_options,
         withdrawn_order_ids=withdrawn_order_ids,
         committed_fee=committed_fee,
+        expected_refunds=[
+            {**r.to_dict(), "usable": False,
+             "reason": "预计退回，到账前不作为可用资金"}
+            for r in expected_refunds],
+        refund_basis=[
+            {"refund_id": r.refund_id, "ref_id": r.ref_id, "target": r.target,
+             "amount": str(r.amount), "fee_refunded": str(r.fee_refunded),
+             "arrival_date": r.arrival_date,
+             "credit_account": r.credit_account}
+            for r in arrived_refunds],
+        refund_allocations=(refund_allocations if refund_allocations is not None
+                            else original_plan.refund_allocations),
     )
     return ReplanResult(plan=revised, residual_replay=final, prefix_replay=prefix)
 
@@ -502,5 +520,6 @@ def combined_replay(scenario: Scenario, execution: Execution, revised: Plan,
         legs.append(TransferLeg(
             o.order_id, o.source, o.target, o.initiate_date, o.arrival_date,
             o.principal, o.fee))
+    refunds, _ = normalize_refunds(execution.refunds)
     return replay(full, legs=legs, snapshot_daily=True,
-                  preloaded_ids=fixed_ids)
+                  preloaded_ids=fixed_ids, refunds=refunds)
