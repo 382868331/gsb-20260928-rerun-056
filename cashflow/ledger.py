@@ -64,6 +64,9 @@ class Ledger:
     opening: dict[str, Decimal]
     balances: dict[str, Decimal] = field(default_factory=dict)
     in_transit: dict[str, TransferLeg] = field(default_factory=dict)
+    # 已与原划拨拆分、正在退回途中的本金（return_id -> 明细）；
+    # 任何一方都不可用，计入在途总额
+    return_in_transit: dict[str, dict] = field(default_factory=dict)
     total_fees: Decimal = Decimal("0")
     payments: list[PaymentResult] = field(default_factory=list)
     snapshots: list[DaySnapshot] = field(default_factory=list)
@@ -109,6 +112,93 @@ class Ledger:
         self._record(date, "transfer_arrive", order_id=order_id,
                      target=leg.target, principal=str(leg.principal))
 
+    def arrive_split(self, date: str, order_id: str,
+                     pending_returns: list[dict]) -> None:
+        """部分拒绝后的划拨到账：收款方只记本金扣除未执行退回后的余额。
+
+        pending_returns 各项含 return_id/return_account/amount/return_fee；
+        未执行退回的本金转入 return_in_transit，实际退回时才入退回账户。
+        """
+        leg = self.in_transit.pop(order_id)
+        held = sum((money(r["amount"]) for r in pending_returns), Decimal("0"))
+        delivered = leg.principal - held
+        if delivered < 0:
+            raise LedgerError(
+                f"{date} 调拨 {order_id} 到账失败：未执行退回合计 {held} "
+                f"超过剩余本金 {leg.principal}")
+        self.balances[leg.target] = (
+            self.balances.get(leg.target, Decimal("0")) + delivered)
+        self._record(date, "transfer_arrive", order_id=order_id,
+                     target=leg.target, principal=str(money(delivered)),
+                     held_for_return=str(money(held)))
+        for r in pending_returns:
+            self.return_in_transit[r["return_id"]] = {
+                "order_id": order_id, "target": leg.target,
+                "return_account": r["return_account"],
+                "amount": money(r["amount"]),
+                "return_fee": money(r["return_fee"]),
+            }
+            self._record(date, "transfer_return_in_transit",
+                         return_id=r["return_id"], order_id=order_id,
+                         amount=str(money(r["amount"])))
+
+    def post_transfer_return(self, date: str, return_id: str, order_id: str,
+                             account: str, amount: Decimal,
+                             fee: Decimal) -> None:
+        """实际退回入账：本金从在途（原划拨或退回在途）转入退回账户。
+
+        退回费用 fee 同日从退回账户扣收（不退还）；退回本金不是新收入，
+        只是在途资金的重新归类，因此不计入 total_inflows。
+        """
+        amount, fee = money(amount), money(fee)
+        if order_id in self.in_transit:
+            leg = self.in_transit[order_id]
+            if leg.principal < amount:
+                raise LedgerError(
+                    f"{date} 退回 {return_id} 失败：划拨 {order_id} 剩余在途本金 "
+                    f"{leg.principal} < 退回 {amount}（退回总额不能超过划拨本金）")
+            leg.principal = money(leg.principal - amount)
+        elif return_id in self.return_in_transit:
+            entry = self.return_in_transit.pop(return_id)
+            if entry["amount"] != amount:
+                raise LedgerError(
+                    f"{date} 退回 {return_id} 金额 {amount} 与拆分在途 "
+                    f"{entry['amount']} 不一致")
+        else:
+            raise LedgerError(
+                f"{date} 退回 {return_id} 失败：划拨 {order_id} 不在途，"
+                "且该退回无拆分在途记录（重复或来源不明，不能制造现金）")
+        self.balances[account] = (
+            self.balances.get(account, Decimal("0")) + amount - fee)
+        self.total_fees += fee
+        self._record(date, "transfer_return", return_id=return_id,
+                     order_id=order_id, account=account,
+                     amount=str(amount), return_fee=str(fee))
+
+    def cancel_transfer_return(self, date: str, return_id: str,
+                               order_id: str) -> None:
+        """撤销尚未执行的退回安排。
+
+        本金已拆分在途的，撤销日转交原收款方；本金仍随原划拨在途的，
+        无需移动（到账时自然全额付给收款方）。
+        """
+        entry = self.return_in_transit.pop(return_id, None)
+        if entry is not None:
+            target = entry["target"]
+            self.balances[target] = (
+                self.balances.get(target, Decimal("0")) + entry["amount"])
+            self._record(date, "transfer_return_cancelled",
+                         return_id=return_id, order_id=order_id,
+                         delivered_to=target, amount=str(entry["amount"]))
+        elif order_id in self.in_transit:
+            self._record(date, "transfer_return_cancelled",
+                         return_id=return_id, order_id=order_id,
+                         note="本金仍随原划拨在途，到账时全额付给收款方")
+        else:
+            raise LedgerError(
+                f"{date} 撤销退回 {return_id} 失败：既无拆分在途记录，"
+                f"划拨 {order_id} 也不在途")
+
     def pay_outflow(self, date: str, flow_id: str, account_id: str,
                     due: Decimal, priority: int) -> PaymentResult:
         """支付支出；余额不足时部分支付，缺口留在 PaymentResult。"""
@@ -125,10 +215,14 @@ class Ledger:
 
     def snapshot(self, date: str) -> None:
         """抓取日终状态：可用余额取在途之外的部分。"""
+        transit = {oid: money(leg.principal)
+                   for oid, leg in sorted(self.in_transit.items())}
+        for rid, entry in sorted(self.return_in_transit.items()):
+            transit[f"RET-{rid}"] = money(entry["amount"])
         self.snapshots.append(DaySnapshot(
             date,
             {k: money(v) for k, v in sorted(self.balances.items())},
-            {oid: money(leg.principal) for oid, leg in sorted(self.in_transit.items())},
+            transit,
         ))
 
     # ---- 核对 ----
@@ -139,6 +233,8 @@ class Ledger:
         balance_total = sum(self.balances.values(), Decimal("0"))
         transit_total = sum((leg.principal for leg in self.in_transit.values()),
                             Decimal("0"))
+        transit_total += sum((e["amount"] for e in self.return_in_transit.values()),
+                             Decimal("0"))
         lhs = balance_total + transit_total + self.total_fees
         rhs = opening_total + self.total_inflows - self.total_paid
         if money(lhs) != money(rhs):

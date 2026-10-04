@@ -14,6 +14,11 @@ from .adoption import (
 from .refund import (
     record_refunds, refund_disposition, compare_refund_strategies,
 )
+from .plan import TransferReturn
+from .rejection import (
+    record_return_notice, record_return_arrival, revise_return_schedule,
+    cancel_return_arrangement, replay_with_returns, transfer_disposition,
+)
 
 __all__ = [
     "Account",
@@ -36,4 +41,7 @@ __all__ = [
     "adopt_partial_arrangements", "compare_partial_adoptions",
     "withdraw_arrangements", "replay_with_adoptions",
     "record_refunds", "refund_disposition", "compare_refund_strategies",
+    "TransferReturn",
+    "record_return_notice", "record_return_arrival", "revise_return_schedule",
+    "cancel_return_arrangement", "replay_with_returns", "transfer_disposition",
 ]

@@ -42,7 +42,8 @@ class ReplayResult:
 def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
            legs: list[TransferLeg] | None = None,
            snapshot_daily: bool = False,
-            preloaded_ids: set[str] | None = None) -> ReplayResult:
+            preloaded_ids: set[str] | None = None,
+            transfer_returns: list | None = None) -> ReplayResult:
     """按日期重放。orders 为计划时与 legs 二选一；legs 可用于执行记录。"""
     scenario.validate()
     if legs is None:
@@ -51,6 +52,10 @@ def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
     leg_ids = [leg.order_id for leg in legs]
     if len(set(leg_ids)) != len(leg_ids):
         raise LedgerError("调拨单号重复")
+    transfer_returns = list(transfer_returns or [])
+    return_ids = [r.return_id for r in transfer_returns]
+    if len(set(return_ids)) != len(return_ids):
+        raise LedgerError("退回单号重复")
 
     inflows: dict[str, list] = {}
     outflows: dict[str, list] = {}
@@ -62,6 +67,29 @@ def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
     for leg in legs:
         initiations.setdefault(leg.initiate_date, []).append(leg)
         arrivals.setdefault(leg.arrival_date, []).append(leg)
+    # 在途划拨的部分退回：实际退回与撤销按日期过账（通知本身不过账）
+    return_arrivals: dict[str, list] = {}
+    return_cancels: dict[str, list] = {}
+    for r in transfer_returns:
+        if r.actual_date is not None:
+            return_arrivals.setdefault(r.actual_date, []).append(r)
+        if r.cancelled_date is not None:
+            return_cancels.setdefault(r.cancelled_date, []).append(r)
+
+    def pending_returns(order_id: str, day: str) -> list[dict]:
+        """day 当日仍未执行（未实际退回、未撤销）的退回安排。"""
+        out = []
+        for r in transfer_returns:
+            if r.order_id != order_id:
+                continue
+            if r.cancelled_date is not None and r.cancelled_date <= day:
+                continue
+            if r.actual_date is not None and r.actual_date <= day:
+                continue
+            out.append({"return_id": r.return_id,
+                        "return_account": r.return_account,
+                        "amount": r.amount, "return_fee": r.return_fee})
+        return sorted(out, key=lambda x: x["return_id"])
 
     ledger = Ledger.open({a.account_id: a.opening_balance
                           for a in scenario.accounts})
@@ -72,20 +100,43 @@ def replay(scenario: Scenario, orders: list[TransferOrder] | None = None,
             ledger.post_inflow(day, f.account_id, f.amount, f.flow_id)
         for leg in sorted(initiations.get(day, []), key=lambda x: x.order_id):
             ledger.initiate(day, leg)   # 余额不足直接抛错
+        for r in sorted(return_arrivals.get(day, []),
+                        key=lambda x: x.return_id):
+            ledger.post_transfer_return(day, r.return_id, r.order_id,
+                                        r.return_account, r.amount,
+                                        r.return_fee)
+        for r in sorted(return_cancels.get(day, []),
+                        key=lambda x: x.return_id):
+            ledger.cancel_transfer_return(day, r.return_id, r.order_id)
         for leg in sorted(arrivals.get(day, []), key=lambda x: x.order_id):
+            pending = pending_returns(leg.order_id, day)
             if leg.order_id in preloaded_ids:
                 # 重规划时已在途的调拨：本金早在 cutoff 前已扣付，此处只补到账
+                held = sum((money(p["amount"]) for p in pending), Decimal("0"))
+                delivered = leg.principal - held
+                if delivered < 0:
+                    raise LedgerError(
+                        f"{day} 调拨 {leg.order_id} 到账失败：未执行退回合计 "
+                        f"{held} 超过本金 {leg.principal}")
                 ledger.balances[leg.target] = (
-                    ledger.balances.get(leg.target, Decimal("0")) + leg.principal)
-                # 本金作为「携带在途转入」入账，与残差期初余额互不相干
+                    ledger.balances.get(leg.target, Decimal("0")) + delivered)
+                # 本金（含待退回部分）作为「携带在途转入」入账，与残差期初互不相干
                 ledger.total_inflows += leg.principal
                 ledger._record(day, "transfer_arrive", order_id=leg.order_id,
-                               target=leg.target, principal=str(leg.principal),
+                               target=leg.target, principal=str(money(delivered)),
                                fixed_in_transit=True)
+                for p in pending:
+                    ledger.return_in_transit[p["return_id"]] = {
+                        "order_id": leg.order_id, "target": leg.target,
+                        "return_account": p["return_account"],
+                        "amount": money(p["amount"]),
+                        "return_fee": money(p["return_fee"])}
             elif leg.order_id not in ledger.in_transit:
                 raise LedgerError(
                     f"{day} 调拨 {leg.order_id} 到账失败：该笔调拨此前未能成功发起"
                     f"（资金未在 {leg.initiate_date} 离开 {leg.source}）")
+            elif pending:
+                ledger.arrive_split(day, leg.order_id, pending)
             else:
                 ledger.arrive(day, leg.order_id)
         day_outs = sorted(outflows.get(day, []),

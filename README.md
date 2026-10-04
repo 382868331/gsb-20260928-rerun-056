@@ -97,6 +97,42 @@
   手续费不退 + 重复通知/更正的全过程演示；新增测试见
   `tests/test_refund.py`。
 
+## 第五轮：在途划拨的部分拒绝与退回
+
+原划拨尚未到达收款方时，一部分本金可能先被退回，另一部分仍在途，之后才
+分别到账或再次退回。系统把三类事件严格区分，重复或乱序记录不能制造现金：
+
+- **拒绝通知 ≠ 实际退回 ≠ 收款到账**：TransferReturn 登记在执行记录
+  Execution.transfer_returns 中；通知（actual_date 为空）只是退回安排，
+  不产生任何可用资金；实际退回才把本金从在途转入 return_account
+  （可跨账户退回）；原划拨到账时，收款方只记「本金 − 未执行退回」的差额，
+  已退回部分不会再次全额记给收款方。
+- **费用两边分清**：原划拨手续费不退（保持已扣状态）；退回时新收
+  return_fee，于实际退回日从退回账户扣收，同样不退还。
+- **多笔退回逐笔核对来源**：同一划拨可对应多笔退回，账内核验每笔退回的
+  实际来源（原划拨在途本金或已拆分的退回在途），活跃退回总额不得超过
+  划拨本金；return_id 重复通知被忽略、更正按 return_id 覆盖，
+  已实际到账的退回不可覆盖也不可撤销。
+- **退回安排可改可撤**：revise_return_schedule() 修改预计退回日
+  （未到达前）；cancel_return_arrangement() 撤销尚未执行的退回——
+  本金仍随原划拨在途的到账时全额付给收款方，已拆分退回在途的撤销日
+  转交原收款方；既有实际到账继续保留。
+- **保存中途状态后重放**：执行记录（含退回安排）随时落盘 JSON，重开后
+  replay_with_returns() / combined_replay() 从同一本账重放，
+  在途（含退回在途）逐日可核，资金守恒。
+
+新增模块/接口：
+
+- cashflow/rejection.py：record_return_notice()、record_return_arrival()、
+  revise_return_schedule()、cancel_return_arrangement()、
+  replay_with_returns()、transfer_disposition()。
+- Execution 扩展 transfer_returns 与 record_transfer_return()；
+  账簿新增 return_in_transit（退回在途，任何一方不可用）；
+  replan.build_prefix() 与 combined_replay() 自动带入退回事件。
+- python -m cashflow returns <场景> <执行记录> [cutoff]：退回去向核对。
+- examples/run_rejection_demo.py：部分拒绝 + 跨账户退回 + 退回费 +
+  撤销未执行退回 + 保存重开的全过程；新增测试见 tests/test_rejection.py。
+
 ## 核心约束
 
 - **支付窗口与原始期限分离**：支出可提供 `window_start/window_end`，`date`
@@ -128,10 +164,12 @@
 - `cashflow/solver_brute.py`：小规模残差 DFS 枚举求解器，用于小例子对拍
 - `cashflow/plan.py`：计划 `Plan` 与实际执行 `Execution`，分文件保存
 - `cashflow/refund.py`：退回/拒付记录、退回去向核对、等待 vs 替代账户对照
+- `cashflow/rejection.py`：在途划拨的部分拒绝/退回、退回去向核对与重放
 - `cashflow/repo.py`：`data/scenarios|plans|executions/` 三类数据分目录
 - `cashflow/report.py`：事件清单、每日各账户资金账、缺口位置、对账报表
 - `examples/run_demo.py`：三账户小例子，枚举与贪心对拍
-- `tests/`：11 个单元测试
+- `examples/run_rejection_demo.py`：在途划拨部分拒绝、跨账户退回与费用调整
+- `tests/`：44 个单元测试
 
 ## 运行
 
@@ -143,6 +181,8 @@
 .venv/bin/python -m cashflow replay data/scenarios/demo01.json <plan.json>
 .venv/bin/python -m examples.run_revision_demo       # 第二轮：延误后修订重规划
 .venv/bin/python -m examples.run_refund_demo         # 第四轮：退回资金与剩余支付重规划
+.venv/bin/python -m examples.run_rejection_demo      # 第五轮：在途划拨部分拒绝与退回
+.venv/bin/python -m cashflow returns data/scenarios/demo04.json <execution.json>
 ```
 
 ## 小例子结论（2026-10-01 至 10-08）

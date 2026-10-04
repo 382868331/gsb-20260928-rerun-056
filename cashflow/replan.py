@@ -162,7 +162,14 @@ def build_prefix(scenario: Scenario, execution: Execution,
             t.order_id, t.source, t.target,
             t.actual_initiate_date, t.actual_arrival_date,
             money(t.actual_principal), money(t.actual_fee)))
-    return replay(prefix_sc, legs=legs, snapshot_daily=True)
+    # 在途划拨的部分退回：只保留 cutoff 前已发生的事件，且来源划拨已发起
+    leg_ids = {leg.order_id for leg in legs}
+    returns = [r for r in getattr(execution, "transfer_returns", [])
+               if r.order_id in leg_ids
+               and (r.actual_date is None or r.actual_date <= cutoff_date)
+               and (r.cancelled_date is None or r.cancelled_date <= cutoff_date)]
+    return replay(prefix_sc, legs=legs, snapshot_daily=True,
+                  transfer_returns=returns)
 
 
 def _residual_scenario(scenario: Scenario, prefix: ReplayResult,
@@ -593,4 +600,5 @@ def combined_replay(scenario: Scenario, execution: Execution, revised: Plan,
             o.order_id, o.source, o.target, o.initiate_date, o.arrival_date,
             o.principal, o.fee))
     return replay(full, legs=legs, snapshot_daily=True,
-                  preloaded_ids=fixed_ids)
+                  preloaded_ids=fixed_ids,
+                  transfer_returns=getattr(execution, "transfer_returns", []))

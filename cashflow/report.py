@@ -22,6 +22,21 @@ def event_log(result: ReplayResult) -> str:
         elif e["event"] == "transfer_arrive":
             lines.append(f"  {e['date']} 调拨到账  {e['order_id']:<6} "
                          f"入账户 {e['target']:<6} +{e['principal']}")
+        elif e["event"] == "transfer_return":
+            lines.append(f"  {e['date']} 退回到账  {e['return_id']:<6} "
+                         f"划拨 {e['order_id']:<6} 入账户 {e['account']:<6} "
+                         f"+{e['amount']}（退回费 {e['return_fee']}）")
+        elif e["event"] == "transfer_return_in_transit":
+            lines.append(f"  {e['date']} 退回在途  {e['return_id']:<6} "
+                         f"划拨 {e['order_id']:<6} 拆分本金 {e['amount']}")
+        elif e["event"] == "transfer_return_cancelled":
+            if "delivered_to" in e:
+                lines.append(f"  {e['date']} 退回撤销  {e['return_id']:<6} "
+                             f"划拨 {e['order_id']:<6} 本金 {e['amount']} "
+                             f"转交原收款方 {e['delivered_to']}")
+            else:
+                lines.append(f"  {e['date']} 退回撤销  {e['return_id']:<6} "
+                             f"划拨 {e['order_id']:<6} {e.get('note', '')}")
         else:
             mark = "" if e["shortfall"] == "0.00" else f" 缺口 {e['shortfall']}"
             lines.append(f"  {e['date']} 支出支付  {e['flow_id']:<8} "
@@ -70,6 +85,8 @@ def reconciliation(result: ReplayResult, scenario: Scenario) -> str:
     opening = sum((a.opening_balance for a in scenario.accounts), Decimal("0"))
     balance = sum(led.balances.values(), Decimal("0"))
     transit = sum((leg.principal for leg in led.in_transit.values()), Decimal("0"))
+    transit += sum((e["amount"] for e in led.return_in_transit.values()),
+                   Decimal("0"))
     lines = [
         "各账户资金账核对:",
         f"  期初合计 {opening} + 收入 {led.total_inflows} - 已付支出 {led.total_paid} "

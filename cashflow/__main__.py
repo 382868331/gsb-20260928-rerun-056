@@ -3,6 +3,7 @@
   python -m cashflow baseline <scenario.json>
   python -m cashflow solve <scenario.json> [--brute] [--data-dir data]
   python -m cashflow replay <scenario.json> <plan.json>
+  python -m cashflow returns <scenario.json> <execution.json> [cutoff]
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from .repo import Repository
 from .scenario import Scenario
 from .replan import FeeAmendment, replan, combined_replay
 from .refund import compare_refund_strategies
+from .rejection import transfer_disposition
 from .plan import RefundRecord
 from decimal import Decimal
 
@@ -77,6 +79,12 @@ def main() -> None:
     p_rev.add_argument("--compare-refund", action="store_true",
                        help="对照 等待退回 vs 替代账户安排")
     p_rev.add_argument("--data-dir", default="data")
+
+    p_ret = sub.add_parser("returns", help="在途划拨部分拒绝/退回的去向核对")
+    p_ret.add_argument("scenario")
+    p_ret.add_argument("execution")
+    p_ret.add_argument("cutoff", nargs="?", default=None,
+                       help="核对截止日，默认场景结束日")
 
     args = parser.parse_args()
 
@@ -158,6 +166,35 @@ def main() -> None:
         print()
         print(reconciliation(full, scenario))
         print(f"\n修订计划与执行记录分开保存：{path}")
+
+    elif args.cmd == "returns":
+        scenario = _load_scenario(args.scenario)
+        execution = Execution.load(args.execution)
+        cutoff = args.cutoff or scenario.end_date
+        disp = transfer_disposition(scenario, execution, cutoff)
+        print(f"在途划拨部分拒绝/退回核对（截至 {disp['cutoff_date']}）:")
+        if not disp["transfers"]:
+            print("  无退回记录")
+        for t in disp["transfers"]:
+            print(f"  划拨 {t['order_id']} {t['source']}->{t['target']} "
+                  f"本金 {t['principal']}")
+            print(f"    已实际退回（可用）{t['returned_arrived_usable']}  "
+                  f"退回在途/预计（不可用）{t['return_pending_not_usable']}  "
+                  f"撤销归还收款方 {t['return_cancelled_back_to_payee']}")
+            print(f"    收款方到账 {t['delivered_to_payee']}  "
+                  f"退回费 {t['return_fees_charged']}（原手续费不退）")
+            for r in t["returns"]:
+                print(f"      {r['return_id']} [{r['status']}] "
+                      f"{r['amount']} -> {r['return_account']} "
+                      f"预计 {r['expected_date']} 实际 {r['actual_date']} "
+                      f"费 {r['return_fee']}")
+        for it in disp["in_transit"]:
+            print(f"  在途 {it['order_id']}: 剩余本金 "
+                  f"{it['remaining_principal']}，{it['arrival_date']} 到账")
+        for rt in disp["return_in_transit"]:
+            print(f"  退回在途 {rt['return_id']}: {rt['amount']} -> "
+                  f"{rt['return_account']}")
+        print(f"  各账户余额: {disp['balances']}")
 
 
 if __name__ == "__main__":
