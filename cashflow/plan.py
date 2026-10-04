@@ -284,6 +284,8 @@ class RejectionEvent:
 
     @property
     def return_date(self) -> str:
+        """仅供展示的退回日期（实际优先，否则预计）；不得用于入账，
+        入账只能依据 actual_return_date。"""
         return self.actual_return_date or self.expected_return_date
 
     def to_dict(self) -> dict:

@@ -204,7 +204,7 @@ def rejection_report(disposition: dict) -> str:
     if not disposition["orders"]:
         return "在途拒绝核对：无拒绝记录"
     lines = [f"在途拒绝核对（截至 {disposition['cutoff_date']}，"
-             "通知本身不产生可用资金）:"]
+             "通知与预计日期本身不产生可用资金）:"]
     for o in disposition["orders"]:
         lines.append(
             f"  调拨 {o['order_id']} 本金 {o['principal']} -> "
@@ -212,18 +212,29 @@ def rejection_report(disposition: dict) -> str:
         for e in o["rejections"]:
             tag = {"cancelled": "已撤销（留在原划拨）",
                    "arrived": "已退回可用",
-                   "return_in_transit": "退回在途，不可用"}[e["status"]]
+                   "return_in_transit": "退回在途（已确认实际日期），不可用",
+                   "expected_unconfirmed": "预计退回（预测，未确认），不可用",
+                   }[e["status"]]
             fee = (f"，退回费用 {e['return_fee']} 不退"
                    if e["return_fee"] != "0.00" else "")
-            actual = e["actual_return_date"] or "未到达"
+            actual = e["actual_return_date"] or "未确认"
             lines.append(
                 f"    {e['rejection_id']} 拒绝 {e['amount']} -> "
                 f"{e['return_account']} 预计 {e['expected_return_date']} "
                 f"实际 {actual} [{tag}]{fee}")
         lines.append(
             f"    小计：已退回可用 {o['returned_arrived_usable']}，"
-            f"退回在途 {o['return_in_transit_not_usable']}，"
+            f"已确认退回在途 {o['return_in_transit_not_usable']}，"
+            f"预计退回（预测）{o['expected_return_forecast_not_usable']}，"
             f"退回费用 {o['return_fees']}")
+    forecast = disposition.get("expected_returns_forecast") or []
+    if forecast:
+        lines.append("  预计退回一览（仅为预测，未确认实际到账，"
+                     "预计日期经过也不增加可用余额）:")
+        for f in forecast:
+            lines.append(
+                f"    {f['rejection_id']} 预计 {f['expected_return_date']} "
+                f"退回 {f['amount']} -> {f['return_account']} [预测，不可用]")
     return "\n".join(lines)
 
 

@@ -1,9 +1,11 @@
-"""第五轮演示：在途划拨被部分拒绝的完整生命周期。
+"""第五轮演示（修订）：在途划拨被部分拒绝的完整生命周期。
 
 场景：资金户 A 向业务户 B 调拨 1000（在途 3 天，手续费 10 不退）。
 在途期间收款方分两次拒绝：400 跨账户退回备用金户 C（退回费用 6 不退），
-200 退回 A；随后研究者修改预计到账日、撤销尚未执行的第二笔退回，
-中途保存执行记录并重开，最后重放全部事件验证资金守恒。
+200 退回 A；随后研究者修改预计到账日（预计日期经过但无实际确认，
+可用余额不增加）、撤销尚未执行的第二笔退回，中途保存执行记录并重开，
+补记的实际到账日晚于预计日（按实际日期入账，不提前可用），
+最后重放全部事件验证资金守恒。
 """
 
 from decimal import Decimal
@@ -78,9 +80,18 @@ def main() -> None:
             execution, "RJ1", expected_return_date="2026-10-08")["handling"])
         print("\n== 撤销尚未执行的 RJ2（200 留在原划拨随原到账日记给 B）==")
         print("  ", execution.cancel_rejection("RJ2")["handling"])
-        print("\n== RJ1 实际于 10-08 到达 ==")
+        repo.save_execution(execution)
+
+        print("\n== 预计退回日 10-08 经过，但尚无实际退回确认 ==")
+        mid_result = replay_with_rejections(scenario, execution)
+        c_balance = next(s for s in mid_result.ledger.snapshots
+                         if s.date == "2026-10-08").balances["C"]
+        print(f"   10-08 日终 C 可用余额 = {c_balance}（预计日期经过不入账，"
+              "退回段仍以未确认状态挂在在途）")
+
+        print("\n== RJ1 实际于 10-09 才确认到达（晚于预计日 10-08）==")
         print("  ", revise_rejection(
-            execution, "RJ1", actual_return_date="2026-10-08")["handling"])
+            execution, "RJ1", actual_return_date="2026-10-09")["handling"])
         repo.save_execution(execution)
 
     print("\n" + rejection_report(rejection_disposition(scenario, execution)))
@@ -89,7 +100,8 @@ def main() -> None:
     print("\n" + daily_ledger(result))
     print("\n" + reconciliation(result, scenario))
     result.ledger.verify_conservation()
-    print("\n资金守恒核对通过：通知不产生现金、退回只入账一次、"
+    print("\n资金守恒核对通过：通知与预计日期不产生现金、"
+          "确认实际日期后才入账（实际晚于预计不提前）、退回只入账一次、"
           "收款方只收到未退回部分、原手续费与退回费用均不退。")
 
 

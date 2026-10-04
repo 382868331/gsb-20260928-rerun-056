@@ -33,7 +33,7 @@ class TransferLeg:
     source: str
     target: str
     initiate_date: str
-    arrival_date: str
+    arrival_date: str | None   # None 表示退回段仅有预计日期、尚未确认实际到账
     principal: Decimal
     fee: Decimal
 
@@ -117,12 +117,20 @@ class Ledger:
     def reject_in_transit(self, date: str, order_id: str, rejection_id: str,
                           amount: Decimal, return_account: str,
                           return_fee: Decimal,
-                          return_arrival_date: str) -> None:
+                          expected_return_date: str,
+                          actual_return_date: str | None = None) -> None:
         """在途划拨被部分拒绝：把被拒绝部分从原划拨拆出。
 
         通知日本身无入账：原划拨在途本金减少 amount，退回费用
-        return_fee 从退回款中扣（计入累计手续费，不退），剩余退回款
-        作为新的在途退回段 RET-<rejection_id>，到退回入账日才可用。
+        return_fee 从退回款中扣（计入累计手续费，不退）。
+
+        预计退回日期与实际可用资金严格分开：
+        - actual_return_date 为 None 时，退回段 RET-<rejection_id> 只以
+          “未确认”状态挂在在途（arrival_date=None），预计日期经过也
+          不会增加任何账户的可用余额；预计日期仅供另行展示；
+        - 补记实际到账日后，退回段才按实际日期入账；实际日期晚于
+          预计日期时，按实际日期入账，不得改写成提前可用。
+
         原划拨最终到账时只把剩余本金记给收款方，已拆出部分不会
         第二次记给收款方。
         """
@@ -153,9 +161,16 @@ class Ledger:
                      rejection_id=rejection_id, amount=str(amount),
                      return_account=return_account,
                      return_fee=str(return_fee),
-                     return_arrival_date=return_arrival_date,
+                     expected_return_date=expected_return_date,
+                     actual_return_date=actual_return_date,
+                     confirmed=actual_return_date is not None,
                      remaining_principal=str(leg.principal))
-        if return_arrival_date <= date:
+        if actual_return_date is None:
+            # 仅有预计日期：退回段挂在在途，等待实际到账确认
+            self.in_transit[ret_id] = TransferLeg(
+                ret_id, leg.target, return_account, date,
+                None, ret_principal, Decimal("0"))
+        elif actual_return_date <= date:
             self.balances[return_account] = (
                 self.balances.get(return_account, Decimal("0"))
                 + ret_principal)
@@ -166,7 +181,7 @@ class Ledger:
         else:
             self.in_transit[ret_id] = TransferLeg(
                 ret_id, leg.target, return_account, date,
-                return_arrival_date, ret_principal, Decimal("0"))
+                actual_return_date, ret_principal, Decimal("0"))
 
     def pay_outflow(self, date: str, flow_id: str, account_id: str,
                     due: Decimal, priority: int) -> PaymentResult:

@@ -1,11 +1,14 @@
-"""第五轮：在途划拨的部分拒绝、退回与收款到账。
+"""第五轮+：在途划拨的部分拒绝、退回与收款到账。
 
 原划拨尚未到达收款方时，可能一部分先退回付款方（或指定账户），
 另一部分仍在途，之后才分别到账或再次退回。本模块把三个阶段严格分开：
 
 - 拒绝通知（RejectionEvent.notice_date）：只登记事件，不增加可用资金；
-- 实际退回（actual_return_date）：退回本金扣除退回费用后入
-  return_account（可跨账户），原手续费与新退回费用均不退还；
+- 预计退回日期（expected_return_date）：仅为预测，另行展示并清晰标注；
+  日期经过但没有实际退回确认时，不得增加账户可用余额；
+- 实际退回（actual_return_date）：确认实际日期后才入账，退回本金扣除
+  退回费用后入 return_account（可跨账户），原手续费与新退回费用均不退还；
+  实际日期晚于预计日期时按实际日期入账，不得改写成提前可用；
 - 收款到账：原划拨到账时，收款方只收到 本金 - 有效拒绝部分，
   已退回部分不会被第二次记给收款方。
 
@@ -132,13 +135,15 @@ def replay_with_rejections(scenario: Scenario, execution: Execution,
         for e in notices.get(day, []):
             ledger.reject_in_transit(
                 day, e.order_id, e.rejection_id, e.amount,
-                e.return_account, e.return_fee, e.return_date)
+                e.return_account, e.return_fee,
+                e.expected_return_date, e.actual_return_date)
         for leg in sorted(arrivals.get(day, []), key=lambda x: x.order_id):
             if leg.order_id not in ledger.in_transit:
                 raise LedgerError(
                     f"{day} 调拨 {leg.order_id} 到账失败：该笔调拨此前未能成功发起")
             ledger.arrive(day, leg.order_id)
-        # 退回段到账（在途 RET-* 中今日到期者）
+        # 退回段到账（在途 RET-* 中已确认实际到账日且今日到期者；
+        # 仅有预计日期的退回段 arrival_date 为 None，不会在此入账）
         for oid in sorted(o for o, leg in ledger.in_transit.items()
                           if o.startswith("RET-") and leg.arrival_date == day):
             ledger.arrive(day, oid)
@@ -161,7 +166,8 @@ def rejection_disposition(scenario: Scenario, execution: Execution,
     """按原划拨逐笔核对拒绝/退回/到账去向。
 
     对每笔被拒绝的划拨报告：原划拨本金、收款方将收到（本金-有效拒绝）、
-    已退回可用、退回在途（预计退回，不可用）、已撤销部分、退回费用。
+    已退回可用、已确认退回在途（不可用）、预计退回（预测，未确认，
+    不可用，单独列出并清晰标注）、已撤销部分、退回费用。
     """
     cutoff_date = cutoff_date or scenario.end_date
     legs = {leg.order_id: leg
@@ -171,6 +177,7 @@ def rejection_disposition(scenario: Scenario, execution: Execution,
         by_order.setdefault(e.order_id, []).append(e)
 
     orders = []
+    forecast: list[dict] = []
     for order_id, events in sorted(by_order.items()):
         leg = legs.get(order_id)
         principal = leg.principal if leg else Decimal("0")
@@ -178,14 +185,27 @@ def rejection_disposition(scenario: Scenario, execution: Execution,
         cancelled = [e for e in events if e.cancelled]
         arrived = [e for e in active
                    if e.arrived and e.actual_return_date <= cutoff_date]
-        arrived_ids = {id(e) for e in arrived}
-        in_transit_back = [e for e in active if id(e) not in arrived_ids]
+        confirmed_transit = [e for e in active
+                             if e.arrived and e.actual_return_date > cutoff_date]
+        unconfirmed = [e for e in active if not e.arrived]
         arrived_amount = sum((e.amount - e.return_fee for e in arrived),
                              Decimal("0"))
         transit_amount = sum((e.amount - e.return_fee
-                              for e in in_transit_back), Decimal("0"))
+                              for e in confirmed_transit), Decimal("0"))
+        forecast_amount = sum((e.amount - e.return_fee
+                               for e in unconfirmed), Decimal("0"))
         rejected_total = sum((e.amount for e in active), Decimal("0"))
         fees = sum((e.return_fee for e in active), Decimal("0"))
+
+        def _status(e: RejectionEvent) -> str:
+            if e.cancelled:
+                return "cancelled"
+            if not e.arrived:
+                return "expected_unconfirmed"
+            if e.actual_return_date <= cutoff_date:
+                return "arrived"
+            return "return_in_transit"
+
         orders.append({
             "order_id": order_id,
             "principal": str(money(principal)),
@@ -193,6 +213,7 @@ def rejection_disposition(scenario: Scenario, execution: Execution,
             "rejected_total": str(money(rejected_total)),
             "returned_arrived_usable": str(money(arrived_amount)),
             "return_in_transit_not_usable": str(money(transit_amount)),
+            "expected_return_forecast_not_usable": str(money(forecast_amount)),
             "return_fees": str(money(fees)),
             "rejections": [
                 {"rejection_id": e.rejection_id,
@@ -201,9 +222,17 @@ def rejection_disposition(scenario: Scenario, execution: Execution,
                  "expected_return_date": e.expected_return_date,
                  "actual_return_date": e.actual_return_date,
                  "return_fee": str(e.return_fee),
-                 "status": ("cancelled" if e.cancelled else
-                            "arrived" if id(e) in arrived_ids else
-                            "return_in_transit")}
+                 "status": _status(e)}
                 for e in events],
         })
-    return {"cutoff_date": cutoff_date, "orders": orders}
+        for e in unconfirmed:
+            forecast.append({
+                "rejection_id": e.rejection_id,
+                "order_id": order_id,
+                "amount": str(money(e.amount - e.return_fee)),
+                "return_account": e.return_account,
+                "expected_return_date": e.expected_return_date,
+                "label": "预计退回（预测，未确认实际到账，不得当作可用资金）",
+            })
+    return {"cutoff_date": cutoff_date, "orders": orders,
+            "expected_returns_forecast": forecast}
