@@ -262,6 +262,9 @@ class RejectionEvent:
 
     - rejection_id 唯一：重复通知被忽略，同一笔的更正（改预计到账日、
       补实际到账日）按 rejection_id 覆盖，乱序登记不产生第二份现金；
+    - 预计退回日（expected_return_date）只是预测展示：日期经过但没有
+      实际退回确认时，退回段一直留在在途，不增加可用余额；实际日期
+      晚于预计时按实际日期入账，不得改写成提前可用；
     - 同一 order_id 的有效拒绝总额不得超过该划拨本金（重放时核对）；
     - cancelled=True 表示尚未执行的退回安排被撤销：该部分留在原划拨上，
       随原到账日记给收款方；已实际到账的退回不得撤销。
@@ -284,6 +287,7 @@ class RejectionEvent:
 
     @property
     def return_date(self) -> str:
+        """展示用日期（实际优先，否则预计）；重放入账只用实际日期。"""
         return self.actual_return_date or self.expected_return_date
 
     def to_dict(self) -> dict:

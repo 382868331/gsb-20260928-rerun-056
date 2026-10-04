@@ -72,10 +72,13 @@ class TestRejectionNoticeVsArrival(unittest.TestCase):
         s = snap(result, "2026-10-04")
         self.assertEqual(s.balances["B"], money("600"))
         self.assertNotIn("T1", s.in_transit)
-        # 退回 10-06 才到 C
-        self.assertEqual(snap(result, "2026-10-05").balances["C"], money("0"))
-        self.assertEqual(snap(result, "2026-10-06").balances["C"],
-                         money("394"))
+        # 预计退回日 10-06 经过但没有实际确认：退回段留在在途，
+        # 可用余额不增加，直到期末也不入账
+        for day in ("2026-10-05", "2026-10-06", "2026-10-07",
+                    "2026-10-12"):
+            s = snap(result, day)
+            self.assertEqual(s.balances["C"], money("0"))
+            self.assertEqual(s.in_transit["RET-RJ1"], money("394"))
         result.ledger.verify_conservation()
 
     def test_payee_not_credited_returned_part_again(self):
@@ -99,9 +102,10 @@ class TestRejectionNoticeVsArrival(unittest.TestCase):
         execution = base_execution()
         record_rejections(execution, [
             RejectionEvent("RJ1", "T1", "2026-10-02", money("400"), "C",
-                           "2026-10-06", return_fee=money("6")),
+                           "2026-10-06", return_fee=money("6"),
+                           actual_return_date="2026-10-06"),
             RejectionEvent("RJ2", "T1", "2026-10-03", money("200"), "A",
-                           "2026-10-05"),
+                           "2026-10-05", actual_return_date="2026-10-05"),
         ])
         result = replay_with_rejections(sc, execution)
         # RJ2 退回原付款账户 A，无退回费用
@@ -140,9 +144,10 @@ class TestRejectionGuards(unittest.TestCase):
         sc = build()
         execution = base_execution()
         e1 = RejectionEvent("RJ1", "T1", "2026-10-02", money("400"), "C",
-                            "2026-10-06", return_fee=money("6"))
+                            "2026-10-06", return_fee=money("6"),
+                            actual_return_date="2026-10-06")
         e2 = RejectionEvent("RJ2", "T1", "2026-10-03", money("200"), "A",
-                            "2026-10-05")
+                            "2026-10-05", actual_return_date="2026-10-05")
         # 乱序登记 + 重复通知
         notes = record_rejections(execution, [e2, e1, e1, e2])
         self.assertEqual([n["action"] for n in notes],
@@ -189,12 +194,15 @@ class TestReviseAndCancel(unittest.TestCase):
                                 expected_return_date="2026-10-08")
         self.assertEqual(note["action"], "corrected")
         result = replay_with_rejections(sc, execution)
+        # 只有预计日期、没有实际确认：两个预计日经过都不入账
         self.assertEqual(snap(result, "2026-10-06").balances["C"], money("0"))
-        self.assertEqual(snap(result, "2026-10-08").balances["C"],
+        self.assertEqual(snap(result, "2026-10-08").balances["C"], money("0"))
+        self.assertEqual(snap(result, "2026-10-08").in_transit["RET-RJ1"],
                          money("394"))
         # 之后补记实际退回日（迟到一天 10-09）
         revise_rejection(execution, "RJ1", actual_return_date="2026-10-09")
         result = replay_with_rejections(sc, execution)
+        # 实际晚于预计：不得改写成提前可用，10-08 仍不可用
         self.assertEqual(snap(result, "2026-10-08").balances["C"], money("0"))
         self.assertEqual(snap(result, "2026-10-09").balances["C"],
                          money("394"))
@@ -221,6 +229,88 @@ class TestReviseAndCancel(unittest.TestCase):
                          money("600"))   # 1000-400，撤销的 200 回到原划拨
         self.assertEqual(snap(result, "2026-10-05").balances["C"],
                          money("400"))   # 既有实际到账保留
+        result.ledger.verify_conservation()
+
+
+class TestExpectedVsActualSeparation(unittest.TestCase):
+    """预计退回与实际可用资金严格分开。"""
+
+    def test_expected_date_passes_without_confirmation_no_credit(self):
+        sc = build()
+        execution = base_execution()
+        record_rejections(execution, [
+            RejectionEvent("RJ1", "T1", "2026-10-02", money("400"), "C",
+                           "2026-10-06", return_fee=money("6")),
+        ])
+        result = replay_with_rejections(sc, execution)
+        # 预计日 10-06 经过、无实际确认：C 的可用余额始终不增加，
+        # 退回净额一直挂在在途（本金与在途守恒）
+        final = snap(result, "2026-10-12")
+        self.assertEqual(final.balances["C"], money("0"))
+        self.assertEqual(final.in_transit["RET-RJ1"], money("394"))
+        result.ledger.verify_conservation()
+        # 预测另行展示并清晰标注为不可用
+        disp = rejection_disposition(sc, execution)
+        order = disp["orders"][0]
+        self.assertEqual(order["returned_arrived_usable"], "0.00")
+        self.assertEqual(order["return_in_transit_not_usable"], "394.00")
+        entry = order["rejections"][0]
+        self.assertEqual(entry["status"], "return_in_transit")
+        self.assertEqual(entry["expected_return_date"], "2026-10-06")
+        self.assertIsNone(entry["actual_return_date"])
+
+    def test_actual_confirmed_late_never_available_early(self):
+        sc = build()
+        execution = base_execution()
+        record_rejections(execution, [
+            RejectionEvent("RJ1", "T1", "2026-10-02", money("400"), "A",
+                           "2026-10-05",
+                           actual_return_date="2026-10-09"),
+        ])
+        result = replay_with_rejections(sc, execution)
+        # 预计 10-05、实际 10-09：10-05 不得提前可用，10-09 才入账
+        self.assertEqual(snap(result, "2026-10-05").balances["A"],
+                         money("990"))
+        self.assertEqual(snap(result, "2026-10-08").in_transit["RET-RJ1"],
+                         money("400"))
+        self.assertEqual(snap(result, "2026-10-09").balances["A"],
+                         money("1390"))
+        result.ledger.verify_conservation()
+
+    def test_duplicate_actual_confirmation_no_double_credit(self):
+        sc = build()
+        execution = base_execution()
+        event = RejectionEvent("RJ1", "T1", "2026-10-02", money("400"), "C",
+                               "2026-10-06", return_fee=money("6"),
+                               actual_return_date="2026-10-06")
+        notes = record_rejections(execution, [event, event])
+        self.assertEqual([n["action"] for n in notes],
+                         ["recorded", "duplicate_ignored"])
+        # 重复补记同一实际到账日：覆盖而非新增
+        revise_rejection(execution, "RJ1", actual_return_date="2026-10-06")
+        self.assertEqual(len(execution.rejections), 1)
+        result = replay_with_rejections(sc, execution)
+        returns = [e for e in result.ledger.log
+                   if e["event"] == "reject_return_arrive"]
+        self.assertEqual(len(returns), 1)
+        self.assertEqual(snap(result, "2026-10-06").balances["C"],
+                         money("394"))
+        result.ledger.verify_conservation()
+
+    def test_save_reload_replay_with_unconfirmed_expected(self):
+        sc = build()
+        execution = base_execution()
+        record_rejections(execution, [
+            RejectionEvent("RJ1", "T1", "2026-10-02", money("400"), "C",
+                           "2026-10-06", return_fee=money("6")),
+        ])
+        with tempfile.TemporaryDirectory() as d:
+            repo = Repository(Path(d))
+            reloaded = Execution.load(repo.save_execution(execution))
+        result = replay_with_rejections(sc, reloaded)
+        final = snap(result, "2026-10-12")
+        self.assertEqual(final.balances["C"], money("0"))
+        self.assertEqual(final.in_transit["RET-RJ1"], money("394"))
         result.ledger.verify_conservation()
 
 

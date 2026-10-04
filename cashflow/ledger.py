@@ -33,7 +33,7 @@ class TransferLeg:
     source: str
     target: str
     initiate_date: str
-    arrival_date: str
+    arrival_date: str | None  # None 表示尚未确认实际到账日（预计退回不算）
     principal: Decimal
     fee: Decimal
 
@@ -117,12 +117,14 @@ class Ledger:
     def reject_in_transit(self, date: str, order_id: str, rejection_id: str,
                           amount: Decimal, return_account: str,
                           return_fee: Decimal,
-                          return_arrival_date: str) -> None:
+                          return_arrival_date: str | None) -> None:
         """在途划拨被部分拒绝：把被拒绝部分从原划拨拆出。
 
         通知日本身无入账：原划拨在途本金减少 amount，退回费用
         return_fee 从退回款中扣（计入累计手续费，不退），剩余退回款
-        作为新的在途退回段 RET-<rejection_id>，到退回入账日才可用。
+        作为新的在途退回段 RET-<rejection_id>，只有确认实际退回日
+        （return_arrival_date 非空）并到达后才可用；预计退回日经过
+        但没有实际确认时，退回段一直留在在途，不增加任何可用余额。
         原划拨最终到账时只把剩余本金记给收款方，已拆出部分不会
         第二次记给收款方。
         """
@@ -153,9 +155,9 @@ class Ledger:
                      rejection_id=rejection_id, amount=str(amount),
                      return_account=return_account,
                      return_fee=str(return_fee),
-                     return_arrival_date=return_arrival_date,
+                     return_arrival_date=return_arrival_date or "未确认",
                      remaining_principal=str(leg.principal))
-        if return_arrival_date <= date:
+        if return_arrival_date is not None and return_arrival_date <= date:
             self.balances[return_account] = (
                 self.balances.get(return_account, Decimal("0"))
                 + ret_principal)

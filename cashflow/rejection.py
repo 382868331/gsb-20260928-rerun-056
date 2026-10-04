@@ -87,7 +87,9 @@ def replay_with_rejections(scenario: Scenario, execution: Execution,
       1) 收入到账（有实际记录按实际，否则按场景）
       2) 调拨发起
       3) 拒绝通知：拆分在途本金，退回段进入在途（通知日不可用）
-      4) 调拨/退回段到账
+      4) 调拨/退回段到账（退回段只按确认的实际退回日入账；
+         预计日期经过但没有实际确认时，退回段留在在途，
+         不得增加可用余额；实际日期晚于预计时不改写成提前可用）
       5) 支出支付
     """
     scenario.validate()
@@ -132,7 +134,7 @@ def replay_with_rejections(scenario: Scenario, execution: Execution,
         for e in notices.get(day, []):
             ledger.reject_in_transit(
                 day, e.order_id, e.rejection_id, e.amount,
-                e.return_account, e.return_fee, e.return_date)
+                e.return_account, e.return_fee, e.actual_return_date)
         for leg in sorted(arrivals.get(day, []), key=lambda x: x.order_id):
             if leg.order_id not in ledger.in_transit:
                 raise LedgerError(
@@ -140,7 +142,9 @@ def replay_with_rejections(scenario: Scenario, execution: Execution,
             ledger.arrive(day, leg.order_id)
         # 退回段到账（在途 RET-* 中今日到期者）
         for oid in sorted(o for o, leg in ledger.in_transit.items()
-                          if o.startswith("RET-") and leg.arrival_date == day):
+                          if o.startswith("RET-")
+                          and leg.arrival_date is not None
+                          and leg.arrival_date == day):
             ledger.arrive(day, oid)
         day_outs = sorted(outflows.get(day, []),
                           key=lambda x: (x.priority, x.flow_id))
