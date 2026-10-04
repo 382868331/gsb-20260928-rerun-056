@@ -249,6 +249,60 @@ class RefundRecord:
         )
 
 
+@dataclass(frozen=True)
+class RejectionEvent:
+    """在途划拨被部分拒绝的事件记录（第五轮）。
+
+    严格区分三个阶段：
+    - 拒绝通知（notice_date）：只登记，不增加任何可用资金；
+    - 实际退回（actual_return_date 非空）：退回本金扣除退回费用后
+      入 return_account（可跨账户），退回费用不退；
+    - 收款到账：原划拨到账时，收款方只收到 本金 - 有效拒绝部分，
+      已退回部分不会被第二次记给收款方。
+
+    - rejection_id 唯一：重复通知被忽略，同一笔的更正（改预计到账日、
+      补实际到账日）按 rejection_id 覆盖，乱序登记不产生第二份现金；
+    - 同一 order_id 的有效拒绝总额不得超过该划拨本金（重放时核对）；
+    - cancelled=True 表示尚未执行的退回安排被撤销：该部分留在原划拨上，
+      随原到账日记给收款方；已实际到账的退回不得撤销。
+    """
+
+    rejection_id: str
+    order_id: str                # 被拒绝的在途调拨单号
+    notice_date: str             # 拒绝通知日（不产生资金变动）
+    amount: Decimal              # 被拒绝部分本金
+    return_account: str          # 退回入账账户（可与原付款账户不同）
+    expected_return_date: str    # 预计退回日（可修改）
+    actual_return_date: str | None = None   # 实际退回日；None 表示尚未到达
+    return_fee: Decimal = Decimal("0")      # 新退回费用（从退回款中扣，不退）
+    cancelled: bool = False      # 尚未执行的退回安排被撤销
+    note: str = ""
+
+    @property
+    def arrived(self) -> bool:
+        return self.actual_return_date is not None
+
+    @property
+    def return_date(self) -> str:
+        return self.actual_return_date or self.expected_return_date
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["amount"] = str(self.amount)
+        d["return_fee"] = str(self.return_fee)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RejectionEvent":
+        return cls(
+            d["rejection_id"], d["order_id"], d["notice_date"],
+            money(d["amount"]), d["return_account"],
+            d["expected_return_date"], d.get("actual_return_date"),
+            money(d.get("return_fee", "0")), d.get("cancelled", False),
+            d.get("note", ""),
+        )
+
+
 @dataclass
 class Execution:
     """实际执行记录，与计划分开保存，供下一轮做计划 vs 实际差异分析。"""
@@ -263,6 +317,8 @@ class Execution:
     actual_inflows: list["ActualInflow"] = field(default_factory=list)
     # 退回/拒付实际记录：按 refund_id 去重，重复通知/更正不增加第二份余额
     refunds: list["RefundRecord"] = field(default_factory=list)
+    # 在途划拨部分拒绝事件：按 rejection_id 去重，通知本身不产生可用资金
+    rejections: list["RejectionEvent"] = field(default_factory=list)
 
     def record_refund(self, record: "RefundRecord") -> dict:
         """登记一笔退回。同一 refund_id 重复通知被忽略，更正则覆盖原记录。"""
@@ -279,6 +335,51 @@ class Execution:
         return {"refund_id": record.refund_id, "action": "recorded",
                 "handling": "新退回记录"}
 
+    def record_rejection(self, event: "RejectionEvent") -> dict:
+        """登记一笔在途部分拒绝。同一 rejection_id 重复通知被忽略，
+        更正（改预计日/补实际到账日）覆盖原记录，不会制造第二份现金。"""
+        for i, existing in enumerate(self.rejections):
+            if existing.rejection_id != event.rejection_id:
+                continue
+            if existing == event:
+                return {"rejection_id": event.rejection_id,
+                        "action": "duplicate_ignored",
+                        "handling": "重复通知：同一 rejection_id 已存在，不增加第二份余额"}
+            if existing.arrived and not event.arrived:
+                return {"rejection_id": event.rejection_id,
+                        "action": "rejected",
+                        "handling": "已实际到账的退回不得改回未到账"}
+            self.rejections[i] = event
+            return {"rejection_id": event.rejection_id,
+                    "action": "corrected",
+                    "handling": "同一笔拒绝的更正：按 rejection_id 覆盖原记录，余额只算一次"}
+        self.rejections.append(event)
+        return {"rejection_id": event.rejection_id, "action": "recorded",
+                "handling": "新拒绝通知（仅登记，不产生可用资金）"}
+
+    def cancel_rejection(self, rejection_id: str) -> dict:
+        """撤销尚未执行的退回安排；已实际到账的退回保留不变。"""
+        for i, existing in enumerate(self.rejections):
+            if existing.rejection_id != rejection_id:
+                continue
+            if existing.cancelled:
+                return {"rejection_id": rejection_id,
+                        "action": "duplicate_ignored",
+                        "handling": "该退回安排此前已撤销"}
+            if existing.arrived:
+                return {"rejection_id": rejection_id, "action": "rejected",
+                        "handling": "已实际到账的退回不得撤销，既有到账保留"}
+            self.rejections[i] = RejectionEvent(
+                existing.rejection_id, existing.order_id,
+                existing.notice_date, existing.amount,
+                existing.return_account, existing.expected_return_date,
+                existing.actual_return_date, existing.return_fee,
+                True, existing.note)
+            return {"rejection_id": rejection_id, "action": "cancelled",
+                    "handling": "退回安排撤销：该部分留在原划拨上，随原到账日记给收款方"}
+        return {"rejection_id": rejection_id, "action": "rejected",
+                "handling": "不存在的 rejection_id"}
+
     def to_dict(self) -> dict:
         return {
             "scenario_id": self.scenario_id,
@@ -288,6 +389,7 @@ class Execution:
             "initiated_order_ids": self.initiated_order_ids,
             "actual_inflows": [f.to_dict() for f in self.actual_inflows],
             "refunds": [r.to_dict() for r in self.refunds],
+            "rejections": [r.to_dict() for r in self.rejections],
         }
 
     @classmethod
@@ -298,6 +400,7 @@ class Execution:
             d.get("initiated_order_ids", []),
             [ActualInflow.from_dict(f) for f in d.get("actual_inflows", [])],
             [RefundRecord.from_dict(r) for r in d.get("refunds", [])],
+            [RejectionEvent.from_dict(r) for r in d.get("rejections", [])],
         )
 
     def save(self, path: str | Path) -> Path:

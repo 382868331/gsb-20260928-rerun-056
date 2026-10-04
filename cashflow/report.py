@@ -22,6 +22,14 @@ def event_log(result: ReplayResult) -> str:
         elif e["event"] == "transfer_arrive":
             lines.append(f"  {e['date']} 调拨到账  {e['order_id']:<6} "
                          f"入账户 {e['target']:<6} +{e['principal']}")
+        elif e["event"] == "reject_notice":
+            lines.append(f"  {e['date']} 拒绝通知  {e['rejection_id']:<6} "
+                         f"调拨 {e['order_id']:<6} 拒绝 {e['amount']} "
+                         f"退回 {e['return_account']}（费用 {e['return_fee']}，"
+                         f"剩余在途 {e['remaining_principal']}，通知日不可用）")
+        elif e["event"] == "reject_return_arrive":
+            lines.append(f"  {e['date']} 退回到账  {e['rejection_id']:<6} "
+                         f"入账户 {e['account']:<6} +{e['amount']}")
         else:
             mark = "" if e["shortfall"] == "0.00" else f" 缺口 {e['shortfall']}"
             lines.append(f"  {e['date']} 支出支付  {e['flow_id']:<8} "
@@ -188,6 +196,34 @@ def refund_report(plan: Plan) -> str:
         for b in basis:
             lines.append(f"    {b['refund_id']} {b['date']} "
                          f"+{b['amount']} -> {b['return_account']} [{b['status']}]")
+    return "\n".join(lines)
+
+
+def rejection_report(disposition: dict) -> str:
+    """在途部分拒绝核对：区分通知、退回在途、已退回可用与收款到账。"""
+    if not disposition["orders"]:
+        return "在途拒绝核对：无拒绝记录"
+    lines = [f"在途拒绝核对（截至 {disposition['cutoff_date']}，"
+             "通知本身不产生可用资金）:"]
+    for o in disposition["orders"]:
+        lines.append(
+            f"  调拨 {o['order_id']} 本金 {o['principal']} -> "
+            f"收款方将收到 {o['payee_receives']}（已退回部分不会二次入账）")
+        for e in o["rejections"]:
+            tag = {"cancelled": "已撤销（留在原划拨）",
+                   "arrived": "已退回可用",
+                   "return_in_transit": "退回在途，不可用"}[e["status"]]
+            fee = (f"，退回费用 {e['return_fee']} 不退"
+                   if e["return_fee"] != "0.00" else "")
+            actual = e["actual_return_date"] or "未到达"
+            lines.append(
+                f"    {e['rejection_id']} 拒绝 {e['amount']} -> "
+                f"{e['return_account']} 预计 {e['expected_return_date']} "
+                f"实际 {actual} [{tag}]{fee}")
+        lines.append(
+            f"    小计：已退回可用 {o['returned_arrived_usable']}，"
+            f"退回在途 {o['return_in_transit_not_usable']}，"
+            f"退回费用 {o['return_fees']}")
     return "\n".join(lines)
 
 

@@ -97,6 +97,40 @@
   手续费不退 + 重复通知/更正的全过程演示；新增测试见
   `tests/test_refund.py`。
 
+## 第五轮：在途划拨的部分拒绝与退回
+
+原划拨尚未到达收款方时，可能一部分先退回付款方（或指定账户），另一部分
+仍在途，之后才分别到账或再次退回。系统把三个阶段严格分开建模：
+
+- **拒绝通知不等于可用资金**：`RejectionEvent`（存在 `Execution.rejections`）
+  在通知日只拆分在途本金——原划拨在途减少、退回段 `RET-<id>` 进入在途，
+  任何一方的可用余额都不变；只有退回段实际到达才入 `return_account`。
+- **收款到账只记未退回部分**：原划拨到账时，收款方只收到
+  `本金 - 有效拒绝部分`，已退回部分不会被第二次记给收款方。
+- **跨账户退回与费用**：退回可入另一账户；原手续费不退，新的退回费用
+  `return_fee` 从退回款中扣（计入累计手续费，不退还）。
+- **多笔退回逐笔核对**：一个划拨可对应多笔拒绝，按 `rejection_id` 去重，
+  重复通知被忽略、更正覆盖原记录，乱序登记结果一致；重放时逐笔核对
+  实际来源（必须是在途的实际调拨）且有效拒绝总额不得超过本金上限，
+  重复或乱序记录不能制造现金。
+- **修改与撤销**：`revise_rejection()` 修改预计到账日/补记实际到账日；
+  `cancel_rejection()` 只撤销尚未执行的退回安排（该部分留在原划拨上，
+  随原到账日记给收款方），已实际到账的退回保留不变。
+- **中途存档重放对账**：执行记录随时落盘，重开后继续追加事件；
+  `replay_with_rejections()` 从期初重放全部事件（收入->发起->拒绝拆分
+  ->到账->支出），每日验证资金守恒。
+
+新增模块/命令：
+
+- `cashflow/rejection.py`：`record_rejections()`、`revise_rejection()`、
+  `replay_with_rejections()`、`rejection_disposition()`；
+  `Ledger.reject_in_transit()` 负责在途拆账。
+- `python -m cashflow reject <场景> <执行记录> --transfer ...
+  --reject RID,ORDER,NOTICE,AMOUNT,RET_ACCT,EXPECTED[,ACTUAL,FEE]
+  [--revise RID,EXPECTED[,ACTUAL]] [--cancel RID]`
+- `examples/run_rejection_demo.py`：部分拒绝 + 跨账户退回 + 退回费用 +
+  改期 + 撤销 + 中途存档重放的全过程；新增测试见 `tests/test_rejection.py`。
+
 ## 核心约束
 
 - **支付窗口与原始期限分离**：支出可提供 `window_start/window_end`，`date`

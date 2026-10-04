@@ -106,8 +106,67 @@ class Ledger:
     def arrive(self, date: str, order_id: str) -> None:
         leg = self.in_transit.pop(order_id)
         self.balances[leg.target] = self.balances.get(leg.target, Decimal("0")) + leg.principal
-        self._record(date, "transfer_arrive", order_id=order_id,
-                     target=leg.target, principal=str(leg.principal))
+        if order_id.startswith("RET-"):
+            self._record(date, "reject_return_arrive", order_id=order_id,
+                         rejection_id=order_id[4:], account=leg.target,
+                         amount=str(leg.principal))
+        else:
+            self._record(date, "transfer_arrive", order_id=order_id,
+                         target=leg.target, principal=str(leg.principal))
+
+    def reject_in_transit(self, date: str, order_id: str, rejection_id: str,
+                          amount: Decimal, return_account: str,
+                          return_fee: Decimal,
+                          return_arrival_date: str) -> None:
+        """在途划拨被部分拒绝：把被拒绝部分从原划拨拆出。
+
+        通知日本身无入账：原划拨在途本金减少 amount，退回费用
+        return_fee 从退回款中扣（计入累计手续费，不退），剩余退回款
+        作为新的在途退回段 RET-<rejection_id>，到退回入账日才可用。
+        原划拨最终到账时只把剩余本金记给收款方，已拆出部分不会
+        第二次记给收款方。
+        """
+        leg = self.in_transit.get(order_id)
+        if leg is None:
+            raise LedgerError(
+                f"{date} 拒绝 {rejection_id} 失败：调拨 {order_id} 不在在途"
+                "（尚未发起或已到账；已到账的退回请用退回记录建模）")
+        amount = money(amount)
+        return_fee = money(return_fee)
+        if amount <= 0:
+            raise LedgerError(f"{date} 拒绝 {rejection_id} 金额必须为正")
+        if amount > leg.principal:
+            raise LedgerError(
+                f"{date} 拒绝 {rejection_id} 超出上限：调拨 {order_id} "
+                f"剩余在途本金 {leg.principal} < 本次拒绝 {amount}")
+        if return_fee < 0 or return_fee > amount:
+            raise LedgerError(
+                f"{date} 拒绝 {rejection_id} 退回费用 {return_fee} "
+                f"不在 [0, {amount}] 区间内")
+        ret_id = f"RET-{rejection_id}"
+        if ret_id in self.in_transit:
+            raise LedgerError(f"{date} 退回段 {ret_id} 已存在，重复拆账")
+        leg.principal = money(leg.principal - amount)
+        self.total_fees += return_fee
+        ret_principal = money(amount - return_fee)
+        self._record(date, "reject_notice", order_id=order_id,
+                     rejection_id=rejection_id, amount=str(amount),
+                     return_account=return_account,
+                     return_fee=str(return_fee),
+                     return_arrival_date=return_arrival_date,
+                     remaining_principal=str(leg.principal))
+        if return_arrival_date <= date:
+            self.balances[return_account] = (
+                self.balances.get(return_account, Decimal("0"))
+                + ret_principal)
+            self._record(date, "reject_return_arrive",
+                         rejection_id=rejection_id, order_id=order_id,
+                         account=return_account,
+                         amount=str(ret_principal))
+        else:
+            self.in_transit[ret_id] = TransferLeg(
+                ret_id, leg.target, return_account, date,
+                return_arrival_date, ret_principal, Decimal("0"))
 
     def pay_outflow(self, date: str, flow_id: str, account_id: str,
                     due: Decimal, priority: int) -> PaymentResult:
