@@ -141,7 +141,7 @@ def _split_principal(amount: Decimal, rule) -> list[Decimal] | None:
 
 
 def _enumerate_chains(scenario: Scenario, target: str, need: Decimal,
-                      deadline: str, id_gen) -> list[Chain]:
+                      deadline: str, id_gen, purpose: str = "") -> list[Chain]:
     """反向 DFS 枚举资金路径，生成调拨链（含手续费逐级回补）。"""
     chains: list[Chain] = []
 
@@ -171,10 +171,10 @@ def _enumerate_chains(scenario: Scenario, target: str, need: Decimal,
             for h_rule, h_pieces, h_init, h_arr in reversed(new_hops):
                 for p in h_pieces:
                     orders.append(TransferOrder(
-                        order_id=next(id_gen), source=h_rule.source,
-                        target=h_rule.target, initiate_date=h_init,
-                        arrival_date=h_arr, principal=p,
-                        fee=h_rule.fee_for(p), purpose=""))
+                            order_id=next(id_gen), source=h_rule.source,
+                            target=h_rule.target, initiate_date=h_init,
+                            arrival_date=h_arr, principal=p,
+                            fee=h_rule.fee_for(p), purpose=purpose))
             chains.append(Chain(orders, fee))
             if len(new_hops) < MAX_HOPS:
                 # 上游须在用款方发起日的前一天到账（同日到账不可用于发起）
@@ -245,7 +245,7 @@ def solve(scenario: Scenario, solver_name: str = "greedy",
         need = money(gap.shortfall)
 
         chains = _enumerate_chains(scenario, gap.account_id, need,
-                                   gap.date, id_gen)
+                                   gap.date, id_gen, purpose=gap.flow_id)
         best = None
         best_score = None
         base_score, _ = _objective(scenario, orders,

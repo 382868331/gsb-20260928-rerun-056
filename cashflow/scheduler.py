@@ -154,8 +154,15 @@ def solve_with_windows(scenario: Scenario,
         scheduled, result, summary = item
         gaps = tuple(result.plan.objective[:3])
         strategy_rank = strategies.index(summary["strategy"])
+        priority_dates = tuple(
+            summary["rescheduled_date"].get(flow.flow_id, flow.date)
+            for flow in sorted(
+                [f for f in scenario.flows
+                 if f.kind == FlowKind.OUTFLOW],
+                key=lambda f: (f.priority, f.flow_id)))
         return (gaps, summary["max_delay_days"], result.plan.total_fee,
-                strategy_rank, tuple(sorted(scheduled.dates.items())))
+                strategy_rank, priority_dates,
+                tuple(sorted(scheduled.dates.items())))
 
     eligible_trials = [x for x in trials if x[2]["strategy"] in eligible_strategies]
     scheduled, chosen, best_summary = min(eligible_trials, key=preference)

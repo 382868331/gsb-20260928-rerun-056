@@ -14,6 +14,9 @@ from .adoption import (
 from .refund import (
     record_refunds, refund_disposition, compare_refund_strategies,
 )
+from .refund_followup import (
+    research_refund_payment_options, replan_after_refund_actuals,
+)
 from .rejection import (
     record_rejections, revise_rejection, replay_with_rejections,
     rejection_disposition,
@@ -41,6 +44,7 @@ __all__ = [
     "adopt_partial_arrangements", "compare_partial_adoptions",
     "withdraw_arrangements", "replay_with_adoptions",
     "record_refunds", "refund_disposition", "compare_refund_strategies",
+    "research_refund_payment_options", "replan_after_refund_actuals",
     "record_rejections", "revise_rejection", "replay_with_rejections",
     "rejection_disposition",
 ]

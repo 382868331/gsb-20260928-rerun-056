@@ -83,6 +83,10 @@ class Plan:
     refund_records: list[dict] = field(default_factory=list)
     # 预计退回但尚未到达的退回（不作为可用资金，仅登记）
     expected_refunds: list[dict] = field(default_factory=list)
+    # 依赖退回资金的多假设后续付款研究；每个假设都是独立 Plan，不污染实际记录
+    refund_forecasts: list[dict] = field(default_factory=list)
+    # 实际退回/预测差异触发的修订来源与影响范围，用于保留原方案核对
+    refund_revision: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -112,6 +116,8 @@ class Plan:
             "committed_fee": str(self.committed_fee),
             "refund_records": self.refund_records,
             "expected_refunds": self.expected_refunds,
+            "refund_forecasts": self.refund_forecasts,
+            "refund_revision": self.refund_revision,
         }
 
     @classmethod
@@ -139,6 +145,8 @@ class Plan:
             money(d.get("committed_fee", "0")),
             d.get("refund_records", []),
             d.get("expected_refunds", []),
+            d.get("refund_forecasts", []),
+            d.get("refund_revision", {}),
         )
 
     def save(self, path: str | Path) -> Path:
