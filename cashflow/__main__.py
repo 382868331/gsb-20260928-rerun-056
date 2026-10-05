@@ -18,6 +18,7 @@ from .report import daily_ledger, event_log, gap_report, plan_summary, reconcili
 from .report import payment_strategy_report, revision_summary
 from .report import refund_report, refund_strategy_report
 from .report import rejection_report
+from .report import followup_study_report, followup_schedule_report
 from .repo import Repository
 from .scenario import Scenario
 from .replan import FeeAmendment, replan, combined_replay
@@ -26,6 +27,8 @@ from .plan import RefundRecord
 from .plan import RejectionEvent, ActualTransfer
 from .rejection import (record_rejections, revise_rejection,
                         replay_with_rejections, rejection_disposition)
+from .followup import (RefundStudyCase, compare_refund_studies,
+                       payment_execution_schedule, adjust_followup_payments)
 from decimal import Decimal
 
 
@@ -98,6 +101,29 @@ def main() -> None:
                        help="修改预计退回日/补记实际退回日，可多次")
     p_rej.add_argument("--cancel", action="append", default=[],
                        metavar="RID", help="撤销尚未执行的退回安排，可多次")
+
+    p_fu = sub.add_parser("followup",
+                          help="依赖退回资金的后续付款方案研究")
+    p_fu.add_argument("scenario")
+    p_fu.add_argument("original_plan")
+    p_fu.add_argument("execution")
+    p_fu.add_argument("cutoff")
+    p_fu.add_argument("--refund", action="append", default=[],
+                      metavar="RID,FLOW,RET_ACCT,EXPECTED,ACTUAL,AMOUNT[,FEE]",
+                      help="退回记录；ACTUAL 留空表示预计退回（不可用），可多次")
+    p_fu.add_argument("--study", action="append", default=[],
+                      metavar="NAME,RID,YYYY-MM-DD",
+                      help="研究假设：某退回按假设日到账（仅对照），可多次；"
+                           "同名条目归为一组假设")
+    p_fu.add_argument("--study-amend", action="append", default=[],
+                      metavar="NAME,S,T,rate,fixed",
+                      help="某组假设下的费率假设；rate/fixed 填空表示不变，可多次")
+    p_fu.add_argument("--reprioritize", action="append", default=[],
+                      metavar="FLOW,PRIO",
+                      help="调整尚未发出付款的优先级，可多次")
+    p_fu.add_argument("--cancel-flow", action="append", default=[],
+                      metavar="FLOW", help="取消尚未发出的付款安排，可多次")
+    p_fu.add_argument("--data-dir", default="data")
 
     args = parser.parse_args()
 
@@ -225,6 +251,68 @@ def main() -> None:
         print()
         print(reconciliation(result, scenario))
         print(f"\n执行记录已保存：{epath}（重开后继续追加事件仍可对账）")
+
+    elif args.cmd == "followup":
+        scenario = _load_scenario(args.scenario)
+        original = Plan.load(args.original_plan)
+        execution = Execution.load(args.execution)
+        for item in args.refund:
+            parts = item.split(",")
+            rid, fid, ret, expected, actual, amount = parts[:6]
+            fee = parts[6] if len(parts) > 6 else "0"
+            payer = next((f.account_id for f in scenario.flows
+                          if f.flow_id == fid), ret)
+            execution.record_refund(RefundRecord(
+                rid, fid, payer, ret, expected, Decimal(amount),
+                actual or None, Decimal(fee)))
+        study_assumptions: dict[str, dict[str, str]] = {}
+        for item in args.study:
+            name, rid, day = item.split(",")
+            study_assumptions.setdefault(name, {})[rid] = day
+        study_amends: dict[str, list] = {}
+        for item in args.study_amend:
+            name, src, tgt, rate, fixed = item.split(",")
+            study_amends.setdefault(name, []).append(FeeAmendment(
+                src, tgt, args.cutoff,
+                None if rate == "" else Decimal(rate),
+                None if fixed == "" else Decimal(fixed)))
+        cases = [RefundStudyCase(name, assumptions,
+                                 tuple(study_amends.get(name, [])))
+                 for name, assumptions in study_assumptions.items()]
+
+        schedule = payment_execution_schedule(
+            scenario, original, execution, args.cutoff)
+        print(followup_schedule_report(schedule))
+        if cases:
+            print()
+            print(followup_study_report(compare_refund_studies(
+                scenario, original, execution, args.cutoff, cases)))
+
+        repo = Repository(args.data_dir)
+        if args.reprioritize or args.cancel_flow:
+            overrides = {}
+            for item in args.reprioritize:
+                fid, prio = item.split(",")
+                overrides[fid] = int(prio)
+            adj = adjust_followup_payments(
+                scenario, original, execution, args.cutoff,
+                priority_overrides=overrides,
+                cancelled_flow_ids=list(args.cancel_flow))
+            saved = repo.save_plan(adj["plan"])
+            print()
+            print(revision_summary(adj["plan"]))
+            full = combined_replay(adj["adjusted_scenario"], execution,
+                                   adj["plan"])
+            print()
+            print(reconciliation(full, adj["adjusted_scenario"]))
+        else:
+            saved = repo.save_plan(schedule["plan"])
+            full = combined_replay(scenario, execution, schedule["plan"])
+            print()
+            print(reconciliation(full, scenario))
+        repo.save_execution(execution)
+        print(f"\n执行表方案已保存：{saved}；"
+              "预计退回仅用于对照，未进入可用余额")
 
 if __name__ == "__main__":
     main()

@@ -147,6 +147,44 @@
   （不退）、预计日期修改、撤销未执行退回安排、中途保存重放，
   本金与在途资金全程守恒（退回段未确认时在途金额保持不变）。
 
+## 第六轮：依赖退回资金的后续付款方案研究
+
+退回资金到位时间不确定时，研究者可对后续付款做假设对照与执行排程，
+但预计退回绝不直接成为可用余额：
+
+- **多组假设对照**（`compare_refund_studies()`）：同一执行记录下用多个
+  预计退回日期与费用假设（`RefundStudyCase`）分别重规划，比较每笔付款
+  能否按时完成；始终先输出「仅实际到账」基线。假设入账只发生在各自的
+  对照方案内，实际余额只认 `actual_date`。
+- **实际到账驱动的付款执行表**（`payment_execution_schedule()`）：
+  多笔实际退回分批进入不同账户时，依照实际到账、调拨时延与
+  「账户余额不得为负（不可跨账户透支）」约束，给出每笔付款
+  可执行/仍需等待、最早可执行日期与所依赖的退回批次；
+  争用同一笔退回现金的付款按 支付日、优先级 分配并逐笔列出。
+- **调整尚未发出的付款**（`adjust_followup_payments()`）：允许调整
+  未发出付款的优先级或取消其安排（决策记为 `cancelled`）；已发出、
+  在途、已到账的事实不因预测变化撤销——已（部分）支付或已过账的
+  支出请求调整会直接报错，已发起调拨自动进入 `fixed_transit`。
+- **实际与预测不一致只重算受影响部分**（`recompute_affected()`）：
+  实际退回按 `refund_id` 登记（去重/更正沿用第四轮），已发起订单
+  不再重扣，仅未执行部分重新求解；逐笔列出受影响/未受影响付款与
+  预测核对，原方案对象与文件保持不动（新方案 `revision_of` 指向它）。
+- **守恒与保存恢复**：迟到退回、部分退回、两项付款争用同一笔现金
+  的场景下，`combined_replay()` 每日核对资金守恒；方案与执行记录
+  落盘重开后继续对账。
+
+新增模块/命令：
+
+- `cashflow/followup.py`：`RefundStudyCase`、`compare_refund_studies()`、
+  `payment_execution_schedule()`、`adjust_followup_payments()`、
+  `recompute_affected()`。
+- `python -m cashflow followup <场景> <原计划> <执行记录> <cutoff>
+  [--refund ...] [--study 名,RID,日期] [--study-amend 名,S,T,率,费]
+  [--reprioritize FLOW,PRIO] [--cancel-flow FLOW]`
+- `examples/run_followup_demo.py`：迟到退回 + 部分退回 + 两付款争用
+  同一笔现金 + 调整/取消 + 重算与落盘重开的全过程；
+  新增测试见 `tests/test_followup.py`。
+
 ## 核心约束
 
 - **支付窗口与原始期限分离**：支出可提供 `window_start/window_end`，`date`
@@ -178,6 +216,7 @@
 - `cashflow/solver_brute.py`：小规模残差 DFS 枚举求解器，用于小例子对拍
 - `cashflow/plan.py`：计划 `Plan` 与实际执行 `Execution`，分文件保存
 - `cashflow/refund.py`：退回/拒付记录、退回去向核对、等待 vs 替代账户对照
+- `cashflow/followup.py`：依赖退回资金的后续付款研究（假设对照、执行表、调整与重算）
 - `cashflow/repo.py`：`data/scenarios|plans|executions/` 三类数据分目录
 - `cashflow/report.py`：事件清单、每日各账户资金账、缺口位置、对账报表
 - `examples/run_demo.py`：三账户小例子，枚举与贪心对拍
@@ -193,6 +232,7 @@
 .venv/bin/python -m cashflow replay data/scenarios/demo01.json <plan.json>
 .venv/bin/python -m examples.run_revision_demo       # 第二轮：延误后修订重规划
 .venv/bin/python -m examples.run_refund_demo         # 第四轮：退回资金与剩余支付重规划
+.venv/bin/python -m examples.run_followup_demo       # 第六轮：依赖退回资金的后续付款研究
 ```
 
 ## 小例子结论（2026-10-01 至 10-08）

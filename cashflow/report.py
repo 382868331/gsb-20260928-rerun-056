@@ -238,6 +238,62 @@ def rejection_report(disposition: dict) -> str:
     return "\n".join(lines)
 
 
+def followup_study_report(options: list[dict]) -> str:
+    """多组预计退回日期/费用假设的付款按时性对照报表。"""
+    lines = ["后续付款方案研究（假设仅用于对照，预计退回不进入可用余额）:"]
+    for o in options:
+        assumed = ", ".join(f"{a['refund_id']}@{a['assumed_date']}"
+                            for a in o["assumed_refunds"]) or "无"
+        fees = ", ".join(
+            f"{a['source']}->{a['target']} "
+            f"{a['fee_rate'] or '不变'}/{a['fee_fixed'] or '不变'}"
+            for a in o["fee_amendments"]) or "无"
+        lines.append(
+            f"  [{o['name']}] 剩余缺口 {o['remaining_gap']} "
+            f"总费用 {o['total_fee']} 全部按时={'是' if o['all_on_time'] else '否'}"
+            f"（假设退回 {assumed}；费用假设 {fees}）")
+        for p in o["payments"]:
+            lines.append(
+                f"    {p['flow_id']} P{p['priority']} 应付 {p['due']} "
+                f"期限 {p['original_due_date']} -> {p['status']} "
+                f"@ {p['scheduled_date']}")
+    return "\n".join(lines)
+
+
+def followup_schedule_report(schedule: dict) -> str:
+    """实际到账驱动的付款执行表（可执行/等待/最早可执行日期）。"""
+    lines = [f"后续付款执行表（截至 {schedule['cutoff_date']}，"
+             f"{schedule['note']}）:"]
+    if schedule["refund_batches"]:
+        lines.append("  实际退回批次:")
+        for b in schedule["refund_batches"]:
+            lines.append(
+                f"    {b['refund_id']} {b['actual_date']} 到 "
+                f"{b['return_account']} {b['amount']}"
+                f"（原付款 {b['original_flow_id']}）")
+    else:
+        lines.append("  实际退回批次: 无")
+    for p in schedule["payments"]:
+        if p["executable"]:
+            head = (f"可执行，最早 {p['earliest_executable_date']}"
+                    f"（{p['status']}）")
+        else:
+            head = f"仍需等待（{p['status']}）"
+        waits = ("、".join(p["waiting_on_refunds"])
+                 if p["waiting_on_refunds"] else "无")
+        lines.append(
+            f"  {p['flow_id']} P{p['priority']} 应付 {p['due']} "
+            f"账户 {p['account_id']} 期限 {p['original_due_date']}: "
+            f"{head}；依赖退回批次 {waits}")
+    for c in schedule["contention"]:
+        lines.append(
+            f"  争用 {c['refund_id']}（{c['amount']} -> "
+            f"{c['return_account']}）: "
+            f"{'、'.join(c['covered_first']) or '无'} 先执行，"
+            f"{'、'.join(c['must_wait']) or '无'} 仍需等待；{c['note']}")
+    return "\n".join(lines)
+
+
 def refund_strategy_report(options: list[dict]) -> str:
     """继续等待退回 vs 替代账户安排 的对照报表。"""
     lines = ["剩余支付重规划对照（等待退回 vs 替代账户安排）:"]

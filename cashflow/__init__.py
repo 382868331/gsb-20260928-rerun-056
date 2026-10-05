@@ -18,6 +18,10 @@ from .rejection import (
     record_rejections, revise_rejection, replay_with_rejections,
     rejection_disposition,
 )
+from .followup import (
+    RefundStudyCase, compare_refund_studies, payment_execution_schedule,
+    adjust_followup_payments, recompute_affected,
+)
 
 __all__ = [
     "Account",
@@ -43,4 +47,7 @@ __all__ = [
     "record_refunds", "refund_disposition", "compare_refund_strategies",
     "record_rejections", "revise_rejection", "replay_with_rejections",
     "rejection_disposition",
+    "RefundStudyCase", "compare_refund_studies",
+    "payment_execution_schedule", "adjust_followup_payments",
+    "recompute_affected",
 ]
